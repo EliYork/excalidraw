@@ -89,8 +89,24 @@ export function createApp({ dataDir = DATA_DIR, maxBodyBytes = DEFAULT_MAX_BODY_
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const pathname = url.pathname;
 
+    // CORS: content is client-encrypted and there are no credentials, so a
+    // permissive policy is acceptable and required for cross-origin dev setups
+    // (the default same-origin deployment never triggers CORS).
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, If-Match");
+
+    if (method === "OPTIONS") {
+      res.writeHead(204);
+      return res.end();
+    }
+
     try {
-      if (pathname === "/health" && method === "GET") {
+      // liveness probe, reachable both directly and through the nginx /api/v2/ prefix
+      if (pathname === "/health" || pathname === "/api/v2/health") {
+        if (method !== "GET") {
+          return sendError(res, 405, "method not allowed");
+        }
         return sendJson(res, 200, {
           status: "ok",
           db: store.integrityOk() ? "ok" : "corrupt",

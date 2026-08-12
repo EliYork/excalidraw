@@ -15,9 +15,11 @@ import { webcrypto } from "node:crypto";
 import { deflateSync, inflateSync } from "node:zlib";
 
 const BASE = process.argv[2] || "http://localhost:8080";
-const ROOM_ID = "0123456789abcdef0123";
-const ROOM_ID2 = "fedcba9876543210fedc";
-const FILE_ID = "a".repeat(40);
+// random ids per run so re-runs never collide with leftover data
+const randHex = (bytes) => Buffer.from(webcrypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
+const ROOM_ID = randHex(10); // 20 hex chars
+const ROOM_ID2 = randHex(10);
+const FILE_ID = randHex(20); // 40 hex chars
 
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
 const b64 = (buf) => Buffer.from(buf).toString("base64");
