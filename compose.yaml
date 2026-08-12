@@ -1,0 +1,57 @@
+# Docker Compose for self-hosted Excalidraw with full collaboration.
+#
+#   docker compose up -d --build
+#
+# Services (single domain, everything behind the nginx frontend):
+#   app      - Excalidraw frontend + reverse proxy (WebSocket upgrade for room)
+#   room     - Socket.IO collaboration server (official excalidraw-room)
+#   storage  - scenes + encrypted files (SQLite + filesystem, zero deps)
+#
+# Runtime configuration: set any of the WS_SERVER_URL / STORAGE_BASE_URL / ...
+# variables in your shell or in a .env file next to this compose file.
+# Empty values (the default) mean "same origin": the app talks to /socket.io
+# and /api/v2 on its own domain, so a single exposed port is enough.
+#
+# Persistence: the storage-data volume keeps SQLite + files across restarts.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${APP_PORT:-8080}:80"
+    environment:
+      WS_SERVER_URL: ${WS_SERVER_URL:-}
+      STORAGE_BASE_URL: ${STORAGE_BASE_URL:-}
+      BACKEND_V2_GET_URL: ${BACKEND_V2_GET_URL:-}
+      BACKEND_V2_POST_URL: ${BACKEND_V2_POST_URL:-}
+      LIBRARY_URL: ${LIBRARY_URL:-}
+      LIBRARY_BACKEND: ${LIBRARY_BACKEND:-}
+      PLUS_LP: ${PLUS_LP:-}
+      PLUS_APP: ${PLUS_APP:-}
+      AI_BACKEND: ${AI_BACKEND:-}
+    depends_on:
+      - room
+      - storage
+    restart: unless-stopped
+
+  room:
+    build: ./docker/room
+    environment:
+      PORT: "80"
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    restart: unless-stopped
+
+  storage:
+    build: ./docker/storage
+    environment:
+      PORT: "8080"
+      DATA_DIR: /data
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-10485760}
+    volumes:
+      - storage-data:/data
+    restart: unless-stopped
+
+volumes:
+  storage-data:

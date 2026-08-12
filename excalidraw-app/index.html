@@ -11,6 +11,14 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="theme-color" content="#121212" />
 
+    <!--
+      Runtime configuration for self-hosted deployments.
+      The reverse proxy (nginx) overwrites public/config.js at container start
+      from environment variables; when absent this empty file keeps the
+      build-time (VITE_APP_*) defaults in effect.
+    -->
+    <script src="/config.js"></script>
+
     <!-- Primary Meta Tags -->
     <meta
       name="title"

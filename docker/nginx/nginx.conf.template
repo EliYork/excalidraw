@@ -1,0 +1,60 @@
+# Self-hosted Excalidraw: nginx reverse proxy configuration.
+#
+# Rendered by the official nginx image entrypoint from environment variables
+# (only variables that are DEFINED are substituted, so nginx $variables like
+# $host / $http_upgrade survive untouched).
+#
+# Topology (single-domain):
+#   /            -> static frontend (built by the root Dockerfile)
+#   /socket.io/  -> room (Socket.IO; WebSocket upgrade required)
+#   /api/v2/     -> storage (scenes + encrypted files)
+#   /healthz     -> liveness probe for this container
+
+server {
+    listen       80;
+    listen  [::]:80;
+    server_name  _;
+
+    root   /usr/share/nginx/html;
+    index  index.html;
+
+    # allow slightly larger bodies than the app's 4 MiB pre-compression limit
+    client_max_body_size 12m;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache";
+    }
+
+    location /api/v2/ {
+        proxy_pass http://storage:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    # Socket.IO — WebSocket upgrade MUST pass through
+    location /socket.io/ {
+        proxy_pass http://room:80;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+}

@@ -17,4 +17,10 @@ FROM nginx:stable-alpine-slim@sha256:2c605dbeab79a6b2a63340474fe58119d0ef95bdc4b
 
 COPY --from=build /opt/node_app/excalidraw-app/build /usr/share/nginx/html
 
-HEALTHCHECK CMD wget -q -O /dev/null http://localhost || exit 1
+# self-hosted deployment: reverse proxy (socket.io upgrade) + runtime config
+# injection from environment variables (see docker/nginx/)
+COPY docker/nginx/nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/nginx/10-runtime-config.sh /docker-entrypoint.d/10-runtime-config.sh
+RUN chmod +x /docker-entrypoint.d/10-runtime-config.sh
+
+HEALTHCHECK CMD wget -q -O /dev/null http://localhost/healthz || exit 1

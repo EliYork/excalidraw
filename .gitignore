@@ -27,3 +27,7 @@ dev-dist
 html
 meta*.json
 .claude
+
+# self-hosted storage runtime data
+docker/storage/data/
+
