@@ -68,6 +68,7 @@ import {
   getCollaborationLink,
   getSyncableElements,
 } from "../data";
+import { WS_SERVER_URL } from "../data/runtimeConfig";
 import {
   encodeFilesForUpload,
   FileManager,
@@ -126,6 +127,8 @@ export interface CollabAPI {
   getActiveRoomLink: CollabInstance["getActiveRoomLink"];
   setCollabError: CollabInstance["setErrorDialog"];
   setUserToFollow: CollabInstance["setUserToFollow"];
+  /** self-hosted diagnostics (see ./diagnostics.ts) */
+  getDiagnostics: CollabInstance["getDiagnostics"];
 }
 
 interface CollabProps {
@@ -144,6 +147,8 @@ class Collab extends PureComponent<CollabProps, CollabState> {
   private collaborators = new Map<SocketId, Collaborator>();
   /** the socket ids of the users following the current user */
   private followedBy = new Set<SocketId>();
+  /** transport-level reconnects since the socket was created (diagnostics) */
+  private reconnectCount = 0;
 
   constructor(props: CollabProps) {
     super(props);
@@ -246,6 +251,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
       getActiveRoomLink: this.getActiveRoomLink,
       setCollabError: this.setErrorDialog,
       setUserToFollow: this.setUserToFollow,
+      getDiagnostics: this.getDiagnostics,
     };
 
     appJotaiStore.set(collabAPIAtom, collabAPI);
@@ -531,7 +537,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
 
     try {
       this.portal.socket = this.portal.open(
-        socketIOClient(import.meta.env.VITE_APP_WS_SERVER_URL, {
+        socketIOClient(WS_SERVER_URL, {
           transports: ["websocket", "polling"],
         }),
         roomId,
@@ -539,6 +545,10 @@ class Collab extends PureComponent<CollabProps, CollabState> {
       );
 
       this.portal.socket.once("connect_error", fallbackInitializationHandler);
+
+      this.portal.socket.on("reconnect", () => {
+        this.reconnectCount++;
+      });
     } catch (error: any) {
       console.error(error);
       this.setErrorDialog(error.message);
@@ -1063,6 +1073,21 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     this.setState({
       errorMessage,
     });
+  };
+
+  /**
+   * Snapshot for the self-hosted diagnostics helper (./diagnostics.ts).
+   * Deliberately plain data; no scene payloads, no keys.
+   */
+  getDiagnostics = () => {
+    const socket = this.portal.socket;
+    return {
+      socketConnected: socket?.connected ?? null,
+      socketInitialized: this.portal.socketInitialized,
+      transport: socket?.io.engine.transport.name ?? null,
+      reconnectCount: this.reconnectCount,
+      roomId: this.portal.roomId,
+    };
   };
 
   render() {

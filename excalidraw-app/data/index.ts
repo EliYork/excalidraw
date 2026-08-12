@@ -12,6 +12,7 @@ import { isInvisiblySmallElement } from "@excalidraw/element";
 import { isInitializedImageElement } from "@excalidraw/element";
 import { t } from "@excalidraw/excalidraw/i18n";
 import { bytesToHexString } from "@excalidraw/common";
+import { BACKEND_V2_GET_URL, BACKEND_V2_POST_URL } from "./runtimeConfig";
 
 import type { UserIdleState } from "@excalidraw/common";
 import type { ImportedDataState } from "@excalidraw/excalidraw/data/types";
@@ -62,8 +63,8 @@ export const getSyncableElements = (
     isSyncableElement(element),
   ) as SyncableExcalidrawElement[];
 
-const BACKEND_V2_GET = import.meta.env.VITE_APP_BACKEND_V2_GET_URL;
-const BACKEND_V2_POST = import.meta.env.VITE_APP_BACKEND_V2_POST_URL;
+const BACKEND_V2_GET = BACKEND_V2_GET_URL;
+const BACKEND_V2_POST = BACKEND_V2_POST_URL;
 
 const generateRoomId = async () => {
   const buffer = new Uint8Array(ROOM_ID_BYTES);

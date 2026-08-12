@@ -1,3 +1,17 @@
+/**
+ * Collaboration persistence layer.
+ *
+ * SELF-HOSTED BUILD: the original Firebase implementation (Firestore
+ * transactions + Firebase Storage) is replaced by the HTTP storage backend
+ * (see ./storage). All exported function signatures are preserved so callers
+ * (Collab.tsx, App.tsx, data/index.ts) are untouched. Encryption, scene
+ * reconciliation, and the version cache below are the official logic.
+ *
+ * Wire semantics are identical to the official one:
+ *   - scenes:  { sceneVersion, iv, ciphertext } (AES-128-GCM, roomKey)
+ *   - files:   deflate -> AES-128-GCM byte streams, paths files/{kind}/{ownerId}/{fileId}
+ * The server only ever sees ciphertext.
+ */
 import { reconcileElements } from "@excalidraw/excalidraw";
 import { MIME_TYPES, toBrandedType } from "@excalidraw/common";
 import { decompressData } from "@excalidraw/excalidraw/data/encode";
@@ -7,15 +21,8 @@ import {
 } from "@excalidraw/excalidraw/data/encryption";
 import { restoreElements } from "@excalidraw/excalidraw/data/restore";
 import { getSceneVersion } from "@excalidraw/element";
-import { initializeApp } from "firebase/app";
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  runTransaction,
-  Bytes,
-} from "firebase/firestore";
-import { getStorage, ref, uploadBytes } from "firebase/storage";
+
+import { getSyncableElements } from ".";
 
 import type { RemoteExcalidrawElement } from "@excalidraw/excalidraw/data/reconcile";
 import type {
@@ -30,64 +37,27 @@ import type {
   DataURL,
 } from "@excalidraw/excalidraw/types";
 
-import { FILE_CACHE_MAX_AGE_SEC } from "../app_constants";
-
-import { getSyncableElements } from ".";
-
 import type { SyncableExcalidrawElement } from ".";
 import type Portal from "../collab/Portal";
 import type { Socket } from "socket.io-client";
+import { storageBackend } from "./storage";
 
-// private
 // -----------------------------------------------------------------------------
-
-let FIREBASE_CONFIG: Record<string, any>;
-try {
-  FIREBASE_CONFIG = JSON.parse(import.meta.env.VITE_APP_FIREBASE_CONFIG);
-} catch (error: any) {
-  console.warn(
-    `Error JSON parsing firebase config. Supplied value: ${
-      import.meta.env.VITE_APP_FIREBASE_CONFIG
-    }`,
+// The Firebase SDK is not used in self-hosted builds. This export exists only
+// to keep the "Export to Excalidraw+" migration feature from crashing at
+// import time; the feature itself is hidden when VITE_APP_PLUS_APP is unset.
+// -----------------------------------------------------------------------------
+export const loadFirebaseStorage = async (): Promise<never> => {
+  throw new Error(
+    "Firebase storage is not available in self-hosted builds. " +
+      "Excalidraw+ migration is not supported.",
   );
-  FIREBASE_CONFIG = {};
-}
-
-let firebaseApp: ReturnType<typeof initializeApp> | null = null;
-let firestore: ReturnType<typeof getFirestore> | null = null;
-let firebaseStorage: ReturnType<typeof getStorage> | null = null;
-
-const _initializeFirebase = () => {
-  if (!firebaseApp) {
-    firebaseApp = initializeApp(FIREBASE_CONFIG);
-  }
-  return firebaseApp;
-};
-
-const _getFirestore = () => {
-  if (!firestore) {
-    firestore = getFirestore(_initializeFirebase());
-  }
-  return firestore;
-};
-
-const _getStorage = () => {
-  if (!firebaseStorage) {
-    firebaseStorage = getStorage(_initializeFirebase());
-  }
-  return firebaseStorage;
-};
-
-// -----------------------------------------------------------------------------
-
-export const loadFirebaseStorage = async () => {
-  return _getStorage();
 };
 
 type FirebaseStoredScene = {
   sceneVersion: number;
-  iv: Bytes;
-  ciphertext: Bytes;
+  iv: Uint8Array;
+  ciphertext: Uint8Array;
 };
 
 const encryptElements = async (
@@ -105,11 +75,10 @@ const decryptElements = async (
   data: FirebaseStoredScene,
   roomKey: string,
 ): Promise<readonly ExcalidrawElement[]> => {
-  const ciphertext = data.ciphertext.toUint8Array() as Uint8Array<ArrayBuffer>;
-  const iv = data.iv.toUint8Array() as Uint8Array<ArrayBuffer>;
+  const ciphertext = data.ciphertext as Uint8Array<ArrayBuffer>;
+  const iv = data.iv as Uint8Array<ArrayBuffer>;
 
-  const decrypted = await decryptData(iv, ciphertext, roomKey);
-  const decodedData = new TextDecoder("utf-8").decode(
+  const decrypted = await decryptData(iv, ciphertext, roomKey);  const decodedData = new TextDecoder("utf-8").decode(
     new Uint8Array(decrypted),
   );
   return JSON.parse(decodedData);
@@ -149,26 +118,15 @@ export const saveFilesToFirebase = async ({
   prefix: string;
   files: { id: FileId; buffer: Uint8Array }[];
 }) => {
-  const storage = await loadFirebaseStorage();
-
-  const erroredFiles: FileId[] = [];
-  const savedFiles: FileId[] = [];
-
-  await Promise.all(
-    files.map(async ({ id, buffer }) => {
-      try {
-        const storageRef = ref(storage, `${prefix}/${id}`);
-        await uploadBytes(storageRef, buffer, {
-          cacheControl: `public, max-age=${FILE_CACHE_MAX_AGE_SEC}`,
-        });
-        savedFiles.push(id);
-      } catch (error: any) {
-        erroredFiles.push(id);
-      }
-    }),
+  const { savedFiles, erroredFiles } = await storageBackend.saveFiles(
+    prefix,
+    files,
   );
 
-  return { savedFiles, erroredFiles };
+  return {
+    savedFiles: savedFiles as FileId[],
+    erroredFiles: erroredFiles as FileId[],
+  };
 };
 
 const createFirebaseSceneDocument = async (
@@ -179,10 +137,16 @@ const createFirebaseSceneDocument = async (
   const { ciphertext, iv } = await encryptElements(roomKey, elements);
   return {
     sceneVersion,
-    ciphertext: Bytes.fromUint8Array(new Uint8Array(ciphertext)),
-    iv: Bytes.fromUint8Array(iv),
+    ciphertext: new Uint8Array(ciphertext),
+    iv,
   } as FirebaseStoredScene;
 };
+
+// The official implementation used a Firestore transaction for read-modify-
+// write. The HTTP backend cannot run server-side transactions over ciphertext,
+// so we implement optimistic concurrency client-side: get -> reconcile ->
+// put(If-Match), retrying on conflict (409).
+const MAX_SAVE_ATTEMPTS = 3;
 
 export const saveToFirebase = async (
   portal: Portal,
@@ -200,42 +164,47 @@ export const saveToFirebase = async (
     return null;
   }
 
-  const firestore = _getFirestore();
-  const docRef = doc(firestore, "scenes", roomId);
+  let storedScene: FirebaseStoredScene | null = null;
 
-  const storedScene = await runTransaction(firestore, async (transaction) => {
-    const snapshot = await transaction.get(docRef);
+  for (let attempt = 0; attempt < MAX_SAVE_ATTEMPTS; attempt++) {
+    const existing = await storageBackend.getScene(roomId);
 
-    if (!snapshot.exists()) {
-      const storedScene = await createFirebaseSceneDocument(elements, roomKey);
+    let elementsToStore: readonly SyncableExcalidrawElement[] = elements;
+    let expectedEtag: string | null = null;
 
-      transaction.set(docRef, storedScene);
-
-      return storedScene;
+    if (existing) {
+      expectedEtag = existing.etag;
+      const prevStoredElements = getSyncableElements(
+        restoreElements(await decryptElements(existing, roomKey), null),
+      );
+      elementsToStore = getSyncableElements(
+        reconcileElements(
+          elements,
+          prevStoredElements as OrderedExcalidrawElement[] as RemoteExcalidrawElement[],
+          appState,
+        ),
+      );
     }
 
-    const prevStoredScene = snapshot.data() as FirebaseStoredScene;
-    const prevStoredElements = getSyncableElements(
-      restoreElements(await decryptElements(prevStoredScene, roomKey), null),
-    );
-    const reconciledElements = getSyncableElements(
-      reconcileElements(
-        elements,
-        prevStoredElements as OrderedExcalidrawElement[] as RemoteExcalidrawElement[],
-        appState,
-      ),
+    const doc = await createFirebaseSceneDocument(elementsToStore, roomKey);
+    const result = await storageBackend.putScene(
+      roomId,
+      doc,
+      expectedEtag,
     );
 
-    const storedScene = await createFirebaseSceneDocument(
-      reconciledElements,
-      roomKey,
-    );
+    if (!result.ok) {
+      // concurrent write won; re-read and retry with fresh data
+      continue;
+    }
 
-    transaction.update(docRef, storedScene);
+    storedScene = doc;
+    break;
+  }
 
-    // Return the stored elements as the in memory `reconciledElements` could have mutated in the meantime
-    return storedScene;
-  });
+  if (!storedScene) {
+    throw new Error("collabSaveFailed: could not commit scene after retries");
+  }
 
   const storedElements = getSyncableElements(
     restoreElements(await decryptElements(storedScene, roomKey), null),
@@ -251,15 +220,12 @@ export const loadFromFirebase = async (
   roomKey: string,
   socket: Socket | null,
 ): Promise<readonly SyncableExcalidrawElement[] | null> => {
-  const firestore = _getFirestore();
-  const docRef = doc(firestore, "scenes", roomId);
-  const docSnap = await getDoc(docRef);
-  if (!docSnap.exists()) {
+  const existing = await storageBackend.getScene(roomId);
+  if (!existing) {
     return null;
   }
-  const storedScene = docSnap.data() as FirebaseStoredScene;
   const elements = getSyncableElements(
-    restoreElements(await decryptElements(storedScene, roomKey), null, {
+    restoreElements(await decryptElements(existing, roomKey), null, {
       deleteInvisibleElements: true,
     }),
   );
@@ -276,44 +242,41 @@ export const loadFilesFromFirebase = async (
   decryptionKey: string,
   filesIds: readonly FileId[],
 ) => {
-  const loadedFiles: BinaryFileData[] = [];
+  const { loadedFiles, erroredFiles: erroredFileIds } =
+    await storageBackend.loadFiles(prefix, filesIds);
+
+  const loaded: BinaryFileData[] = [];
   const erroredFiles = new Map<FileId, true>();
 
+  for (const fileId of erroredFileIds) {
+    erroredFiles.set(fileId as FileId, true);
+  }
+
   await Promise.all(
-    [...new Set(filesIds)].map(async (id) => {
+    loadedFiles.map(async ({ id, buffer }) => {
       try {
-        const url = `https://firebasestorage.googleapis.com/v0/b/${
-          FIREBASE_CONFIG.storageBucket
-        }/o/${encodeURIComponent(prefix.replace(/^\//, ""))}%2F${id}`;
-        const response = await fetch(`${url}?alt=media`);
-        if (response.status < 400) {
-          const arrayBuffer = await response.arrayBuffer();
+        const { data, metadata } = await decompressData<BinaryFileMetadata>(
+          buffer,
+          {
+            decryptionKey,
+          },
+        );
 
-          const { data, metadata } = await decompressData<BinaryFileMetadata>(
-            new Uint8Array(arrayBuffer),
-            {
-              decryptionKey,
-            },
-          );
+        const dataURL = new TextDecoder().decode(data) as DataURL;
 
-          const dataURL = new TextDecoder().decode(data) as DataURL;
-
-          loadedFiles.push({
-            mimeType: metadata.mimeType || MIME_TYPES.binary,
-            id,
-            dataURL,
-            created: metadata?.created || Date.now(),
-            lastRetrieved: metadata?.created || Date.now(),
-          });
-        } else {
-          erroredFiles.set(id, true);
-        }
+        loaded.push({
+          mimeType: metadata.mimeType || MIME_TYPES.binary,
+          id: id as FileId,
+          dataURL,
+          created: metadata?.created || Date.now(),
+          lastRetrieved: metadata?.created || Date.now(),
+        });
       } catch (error: any) {
-        erroredFiles.set(id, true);
+        erroredFiles.set(id as FileId, true);
         console.error(error);
       }
     }),
   );
 
-  return { loadedFiles, erroredFiles };
+  return { loadedFiles: loaded, erroredFiles };
 };
