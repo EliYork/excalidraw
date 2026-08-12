@@ -1,0 +1,16 @@
+{
+  "name": "excalidraw-selfhost-storage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted storage backend for Excalidraw collaboration (scenes + encrypted files). Zero npm dependencies.",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}
