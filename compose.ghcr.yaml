@@ -1,27 +1,20 @@
-# Docker Compose for self-hosted Excalidraw with full collaboration.
+# GHCR production compose — pulls prebuilt images from GitHub Container
+# Registry (image-only, no build). Usage:
 #
-#   docker compose up -d --build
+#   cp .env.example .env        # set GHCR_IMAGE_PREFIX, adjust anything else
+#   docker compose -f compose.ghcr.yaml up -d
 #
-# Services (single domain, everything behind the nginx frontend):
-#   app      - Excalidraw frontend + reverse proxy (WebSocket upgrade for room)
-#   room     - Socket.IO collaboration server (official excalidraw-room)
-#   storage  - scenes + encrypted files (SQLite + filesystem, zero deps)
+# Image tags: default "latest"; pin IMAGE_TAG to a specific build
+# (vX.Y.Z or sha-<12hex>) for reproducible deploys and rollbacks.
 #
-# Runtime configuration: set any of the WS_SERVER_URL / STORAGE_BASE_URL / ...
-# variables in your shell or in a .env file next to this compose file.
-# Empty values (the default) mean "same origin": the app talks to /socket.io
-# and /api/v2 on its own domain, so a single exposed port is enough.
+# Identical topology to compose.yaml (local build), and the storage volume is
+# shared by name, so switching between build mode and GHCR mode keeps data.
 #
 # Persistence: the storage-data volume keeps SQLite + files across restarts.
-# The volume is declared with an explicit name shared with compose.ghcr.yaml
-# (GHCR image mode), so switching between local build and prebuilt images
-# keeps the same data.
 
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${GHCR_IMAGE_PREFIX:?set GHCR_IMAGE_PREFIX in .env, e.g. ghcr.io/your-account/excalidraw}/app:${IMAGE_TAG:-latest}
     ports:
       - "${APP_PORT:-8080}:80"
     environment:
@@ -43,14 +36,14 @@ services:
     restart: unless-stopped
 
   room:
-    build: ./docker/room
+    image: ${GHCR_IMAGE_PREFIX}/room:${IMAGE_TAG:-latest}
     environment:
       PORT: "80"
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
     restart: unless-stopped
 
   storage:
-    build: ./docker/storage
+    image: ${GHCR_IMAGE_PREFIX}/storage:${IMAGE_TAG:-latest}
     environment:
       PORT: "8080"
       DATA_DIR: /data
@@ -64,6 +57,6 @@ services:
 
 volumes:
   storage-data:
-    # explicit name shared with compose.ghcr.yaml: switching between build
-    # mode and GHCR image mode keeps the same persistent data
+    # explicit name shared with compose.yaml: switching between build mode
+    # and GHCR image mode keeps the same persistent data
     name: excalidraw-storage-data

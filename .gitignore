@@ -1,4 +1,6 @@
 .DS_Store
+# local compose environment (copy of .env.example)
+.env
 .env.development.local
 .env.local
 .env.production.local
