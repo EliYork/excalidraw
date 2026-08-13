@@ -40,7 +40,7 @@ docker compose up -d --build
 | `AI_BACKEND` | AI 功能后端；空 = 隐藏入口 | |
 | `APP_PORT` | 宿主端口映射（compose 用） | `8080` |
 | `CORS_ORIGIN` | room 服务的 CORS（默认 `*`，同源部署无需改） | |
-| `MAX_BODY_BYTES` | storage 单请求上限（默认 10 MiB） | |
+| `MAX_FILE_UPLOAD_BYTES` | 图片上传上限（字节；默认 `20971520` = 20 MiB）。单一来源：前端检查 + storage body limit + nginx `client_max_body_size` 三者一致 | `10485760`（10 MiB） |
 
 修改 `compose.yaml` 同级 `.env` 文件后 `docker compose up -d` 即生效（app 容器重启时重新生成 `/config.js`）。
 
@@ -59,7 +59,7 @@ docker compose up -d --build
 
 - 服务端只见密文：scene 与图片均在浏览器端用房间密钥（AES-128-GCM）加密后上传；房间密钥只在 URL hash 中流转。
 - 房间链接即凭证（官方语义，无服务端鉴权）。如需要访问控制，请在反向代理层加 Basic Auth / SSO。
-- 上传上限 10 MiB/请求（`MAX_BODY_BYTES`），nginx `client_max_body_size 12m`。
+- 上传上限默认 20 MiB/请求（单一来源 `MAX_FILE_UPLOAD_BYTES`：前端检查 + storage `MAX_BODY_BYTES` + nginx `client_max_body_size` 三者一致，改环境变量即全局生效）。
 - ID 全部白名单校验（roomId 20 hex / fileId 40 hex / prefix 白名单），杜绝 path traversal。
 - 生产环境请置于 HTTPS 之后（浏览器 Web Crypto API 需要安全上下文；`http://localhost` 除外）。
 
