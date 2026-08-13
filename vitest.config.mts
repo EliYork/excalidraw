@@ -76,7 +76,14 @@ export default defineConfig({
   test: {
     // Storage uses Node's built-in test runner; don't collect those files as
     // Vitest suites when running the monorepo-wide app tests.
-    exclude: ["docker/storage/test/**", "**/node_modules/**"],
+    exclude: [
+      "docker/storage/test/**",
+      // requires node:sqlite (Node >= 22.5); runs on Node 24 via
+      // `yarn test:selfhost` (see vitest.imagecollab.config.mts and the
+      // test-selfhost job in .github/workflows/test.yml)
+      "excalidraw-app/tests/imageCollabRegression.test.ts",
+      "**/node_modules/**",
+    ],
     // Since hooks are running in stack in v2, which means all hooks run serially whereas
     // we need to run them in parallel
     sequence: {

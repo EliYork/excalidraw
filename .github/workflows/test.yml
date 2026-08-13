@@ -17,3 +17,22 @@ jobs:
         run: |
           yarn install
           yarn test:app
+
+  # Self-host regression suite (image collaboration against the real storage
+  # server). Needs node:sqlite (Node >= 22.5), so it runs on Node 24 instead
+  # of the official Node 20 baseline; the suite is excluded from the generic
+  # `yarn test:app` run above and executed here for real (no skip/exclude).
+  test-selfhost:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.x
+      - name: Install and run self-host regression tests
+        run: |
+          yarn install
+          yarn test:selfhost
+          # storage backend suite (node:test) also needs node:sqlite
+          yarn --cwd docker/storage test
