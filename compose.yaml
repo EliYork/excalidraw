@@ -31,6 +31,9 @@ services:
       PLUS_LP: ${PLUS_LP:-}
       PLUS_APP: ${PLUS_APP:-}
       AI_BACKEND: ${AI_BACKEND:-}
+      # single source of truth for the image upload limit (frontend checks +
+      # storage body limit); default 20 MiB
+      MAX_FILE_UPLOAD_BYTES: ${MAX_FILE_UPLOAD_BYTES:-20971520}
     depends_on:
       - room
       - storage
@@ -48,7 +51,10 @@ services:
     environment:
       PORT: "8080"
       DATA_DIR: /data
-      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-10485760}
+      # body limit driven by the same MAX_FILE_UPLOAD_BYTES variable as the
+      # frontend (files are stored deflated+encrypted so they never exceed the
+      # original size; scenes are small JSON)
+      MAX_BODY_BYTES: ${MAX_FILE_UPLOAD_BYTES:-20971520}
     volumes:
       - storage-data:/data
     restart: unless-stopped

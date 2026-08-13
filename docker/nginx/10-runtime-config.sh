@@ -16,9 +16,10 @@ set -eu
 : "${PLUS_LP:=}"
 : "${PLUS_APP:=}"
 : "${AI_BACKEND:=}"
+: "${MAX_FILE_UPLOAD_BYTES:=20971520}" # 20 MiB
 
 export WS_SERVER_URL STORAGE_BASE_URL BACKEND_V2_GET_URL BACKEND_V2_POST_URL \
-  LIBRARY_URL LIBRARY_BACKEND PLUS_LP PLUS_APP AI_BACKEND
+  LIBRARY_URL LIBRARY_BACKEND PLUS_LP PLUS_APP AI_BACKEND MAX_FILE_UPLOAD_BYTES
 
 # escape double quotes and backslashes for safe embedding in JS strings
 escape() {
@@ -36,6 +37,7 @@ window.__EXCALIDRAW_RUNTIME_CONFIG__ = {
   plusLp: "$(escape "$PLUS_LP")",
   plusApp: "$(escape "$PLUS_APP")",
   aiBackend: "$(escape "$AI_BACKEND")",
+  maxFileUploadBytes: ${MAX_FILE_UPLOAD_BYTES},
 };
 EOF
 

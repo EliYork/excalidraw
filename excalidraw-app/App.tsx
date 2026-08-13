@@ -88,6 +88,7 @@ import {
   appJotaiStore,
 } from "./app-jotai";
 import {
+  FILE_UPLOAD_MAX_BYTES,
   FIREBASE_STORAGE_PREFIXES,
   isExcalidrawPlusSignedUser,
   STORAGE_KEYS,
@@ -953,6 +954,7 @@ const ExcalidrawWrapper = () => {
         initialData={initialStatePromiseRef.current.promise}
         isCollaborating={isCollaborating}
         onPointerUpdate={collabAPI?.onPointerUpdate}
+        imageOptions={{ maxFileSizeBytes: FILE_UPLOAD_MAX_BYTES }}
         UIOptions={{
           canvasActions: {
             toggleTheme: true,

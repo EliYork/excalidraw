@@ -28,6 +28,8 @@ export type RuntimeConfig = {
   plusLp?: string;
   plusApp?: string;
   aiBackend?: string;
+  /** Max allowed image upload size in bytes (default 20 MiB). */
+  maxFileUploadBytes?: number;
 };
 
 declare global {
@@ -93,3 +95,18 @@ export const AI_BACKEND: string =
   runtimeConfig.aiBackend !== undefined
     ? runtimeConfig.aiBackend
     : import.meta.env.VITE_APP_AI_BACKEND || "";
+
+/** Default max image upload size: 20 MiB (self-hosted; official default is 4 MiB). */
+export const DEFAULT_MAX_FILE_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Max allowed image upload size in bytes. Single source of truth for the
+ * frontend checks (insertion + FileManager.encodeFilesForUpload); the storage
+ * service's body limit must be configured >= this (compose uses the same
+ * MAX_FILE_UPLOAD_BYTES variable).
+ */
+export const MAX_FILE_UPLOAD_BYTES: number =
+  runtimeConfig.maxFileUploadBytes !== undefined
+    ? runtimeConfig.maxFileUploadBytes
+    : Number(import.meta.env.VITE_APP_MAX_FILE_UPLOAD_BYTES) ||
+      DEFAULT_MAX_FILE_UPLOAD_BYTES;

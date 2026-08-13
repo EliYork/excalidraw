@@ -14,6 +14,9 @@ interface ImportMetaEnv {
   // self-hosted storage backend root (without /api/v2 suffix); empty = same origin
   VITE_APP_STORAGE_BASE_URL: string;
 
+  // max image upload bytes (self-hosted; defaults to 20 MiB at runtime)
+  VITE_APP_MAX_FILE_UPLOAD_BYTES: string;
+
   // set this only if using the collaboration workflow we use on excalidraw.com
   VITE_APP_PORTAL_URL: string;
   VITE_APP_AI_BACKEND: string;

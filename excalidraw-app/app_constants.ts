@@ -1,4 +1,6 @@
 // time constants (ms)
+import { MAX_FILE_UPLOAD_BYTES } from "./data/runtimeConfig";
+
 export const SAVE_TO_LOCAL_STORAGE_TIMEOUT = 300;
 export const INITIAL_SCENE_UPDATE_TIMEOUT = 5000;
 export const FILE_UPLOAD_TIMEOUT = 300;
@@ -9,7 +11,8 @@ export const CURSOR_SYNC_TIMEOUT = 33; // ~30fps
 export const DELETED_ELEMENT_TIMEOUT = 24 * 60 * 60 * 1000; // 1 day
 
 // should be aligned with MAX_ALLOWED_FILE_BYTES
-export const FILE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // 4 MiB
+// self-hosted: configurable, defaults to 20 MiB (see data/runtimeConfig.ts)
+export const FILE_UPLOAD_MAX_BYTES = MAX_FILE_UPLOAD_BYTES;
 // 1 year (https://stackoverflow.com/a/25201898/927631)
 export const FILE_CACHE_MAX_AGE_SEC = 31536000;
 
