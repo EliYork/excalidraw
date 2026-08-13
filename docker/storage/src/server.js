@@ -20,6 +20,7 @@ import {
   existsSync,
   renameSync,
   mkdirSync,
+  readFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -248,6 +249,18 @@ async function handleFiles(req, res, store, kind, ownerId, fileId, method, maxBo
 
     renameSync(tmpPath, absPath);
     store.upsertFileMeta(kind, ownerId, fileId, size);
+
+    // diagnostic: log the wire format so mis-encoded uploads are visible in
+    // server logs (compressData output must start with concatBuffers version
+    // chunk 00 00 00 01)
+    let firstBytes = "";
+    try {
+      firstBytes = Array.from(readFileSync(absPath).subarray(0, 4)).join(",");
+    } catch {}
+    console.log(
+      `PUT /api/v2/files/${kind}/${ownerId}/${fileId} 200 ${size}B hdr=[${firstBytes}]`,
+    );
+
     return sendJson(res, 200, { ok: true, size });
   }
   return sendError(res, 405, "method not allowed");

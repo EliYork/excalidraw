@@ -271,9 +271,14 @@ export const loadFilesFromFirebase = async (
           created: metadata?.created || Date.now(),
           lastRetrieved: metadata?.created || Date.now(),
         });
+
+        console.debug(
+          `[collab] file ${id} recovered: mimeType=${metadata?.mimeType}, ` +
+            `dataURL=${dataURL.slice(0, 40)}… (${dataURL.length} chars)`,
+        );
       } catch (error: any) {
         erroredFiles.set(id as FileId, true);
-        console.error(error);
+        console.error(`[collab] file ${id} decrypt/decompress FAILED`, error);
       }
     }),
   );

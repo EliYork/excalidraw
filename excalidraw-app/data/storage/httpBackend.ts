@@ -115,6 +115,25 @@ export class HttpStorageBackend implements StorageBackend {
     await Promise.all(
       files.map(async ({ id, buffer }) => {
         try {
+          // defensive check: the official pipeline (FileManager.encodeFilesForUpload
+          // -> compressData) always produces a concatBuffers payload starting with
+          // version chunk 00 00 00 01. A bare iv+ciphertext blob here means the
+          // remote client will fail to decode it — log loudly instead of silently
+          // persisting broken data.
+          const isCompressData =
+            buffer.byteLength >= 4 &&
+            buffer[0] === 0 &&
+            buffer[1] === 0 &&
+            buffer[2] === 0 &&
+            buffer[3] === 1;
+          if (!isCompressData) {
+            console.error(
+              `[storage] WARNING: file ${id} is NOT compressData format ` +
+                `(${buffer.byteLength}B, first bytes ${Array.from(
+                  buffer.slice(0, 4),
+                ).join(",")}) — remote clients will fail to decode it`,
+            );
+          }
           const res = await fetch(this.url(`/files/${kind}/${ownerId}/${id}`), {
             method: "PUT",
             // slice() copies into a fresh ArrayBuffer (typed-array generics)
@@ -150,15 +169,22 @@ export class HttpStorageBackend implements StorageBackend {
     await Promise.all(
       [...new Set(fileIds)].map(async (id) => {
         try {
-          const res = await fetch(this.url(`/files/${kind}/${ownerId}/${id}`));
+          const url = this.url(`/files/${kind}/${ownerId}/${id}`);
+          const res = await fetch(url);
           if (res.ok) {
             const buffer = new Uint8Array(await res.arrayBuffer());
             loadedFiles.push({ id, buffer });
+            console.debug(
+              `[storage] GET ${url} -> 200, ${buffer.byteLength} bytes`,
+            );
           } else {
+            console.warn(
+              `[storage] GET ${url} -> ${res.status} (${res.statusText})`,
+            );
             erroredFiles.push(id);
           }
         } catch (error) {
-          console.error(error);
+          console.error(`[storage] GET failed for ${id}`, error);
           erroredFiles.push(id);
         }
       }),
