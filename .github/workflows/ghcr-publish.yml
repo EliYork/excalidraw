@@ -39,11 +39,13 @@ jobs:
             description: Excalidraw web app (nginx frontend + reverse proxy), self-hosted edition
           - image: room
             context: docker/room
-            dockerfile: Dockerfile
+            # buildx resolves -f relative to the CWD (repo root), not the
+            # context, so use the full repo-relative path
+            dockerfile: docker/room/Dockerfile
             description: Excalidraw collaboration room server (Socket.IO)
           - image: storage
             context: docker/storage
-            dockerfile: Dockerfile
+            dockerfile: docker/storage/Dockerfile
             description: Excalidraw self-hosted storage (scenes + encrypted files)
 
     steps:
