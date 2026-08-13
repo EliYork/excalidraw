@@ -82,6 +82,7 @@ export default defineConfig({
       // `yarn test:selfhost` (see vitest.imagecollab.config.mts and the
       // test-selfhost job in .github/workflows/test.yml)
       "excalidraw-app/tests/imageCollabRegression.test.ts",
+      "excalidraw-app/tests/lobbyRegistry.test.ts",
       "**/node_modules/**",
     ],
     // Since hooks are running in stack in v2, which means all hooks run serially whereas

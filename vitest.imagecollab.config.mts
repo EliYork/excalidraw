@@ -77,10 +77,13 @@ export default defineConfig({
   },
   //@ts-ignore
   test: {
-    // only the self-host image-collab regression suite; it requires
-    // node:sqlite (Node >= 22.5) and is wired as `yarn test:selfhost`
+    // only the self-host regression suites; they require node:sqlite
+    // (Node >= 22.5) and are wired as `yarn test:selfhost`
     // (run on Node 24 in CI via the test-selfhost job)
-    include: ["excalidraw-app/tests/imageCollabRegression.test.ts"],
+    include: [
+      "excalidraw-app/tests/imageCollabRegression.test.ts",
+      "excalidraw-app/tests/lobbyRegistry.test.ts",
+    ],
     environment: "jsdom",
     globals: true,
     // official polyfills (devicePixelRatio, fonts, indexeddb, ...) + real WebCrypto
