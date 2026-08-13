@@ -12,33 +12,30 @@
  * This exercises the full integration layer (adapter -> HTTP -> disk -> HTTP
  * -> adapter) including real crypto, not just "bytes in == bytes out".
  */
-import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { compressData, decompressData } from "@excalidraw/excalidraw/data/encode";
+import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+
+import {
+  compressData,
+  decompressData,
+} from "@excalidraw/excalidraw/data/encode";
 import { generateEncryptionKey } from "@excalidraw/excalidraw/data/encryption";
-import type { FileId } from "@excalidraw/element/types";
+
+import type { ExcalidrawElement, FileId } from "@excalidraw/element/types";
+import type { BinaryFileData, BinaryFiles } from "@excalidraw/excalidraw/types";
 
 import { FileManager } from "../data/FileManager";
 import { HttpStorageBackend } from "../data/storage/httpBackend";
 import { createApp } from "../../docker/storage/src/server.js";
-
-// inline mirrors of the official types (avoid pulling browser-dependent modules)
-type BinaryFileMetadata = {
-  id?: string;
-  mimeType?: string;
-  created?: number;
-  lastRetrieved?: number;
-};
-type BinaryFileData = {
-  mimeType: string;
-  id: string;
-  dataURL: string;
-  created: number;
-  lastRetrieved: number;
-};
 
 // 1x1 red PNG
 const ORIGINAL_DATA_URL =
@@ -56,6 +53,7 @@ let closeServer: () => Promise<void>;
 // pointing the runtime config at the test server (exactly what config.js does
 // in a real deployment).
 let loadFilesFromFirebase: typeof import("../data/firebase")["loadFilesFromFirebase"];
+let saveCollabFiles: typeof import("../data/firebase")["saveCollabFiles"];
 
 beforeAll(async () => {
   dataDir = mkdtempSync(path.join(tmpdir(), "excal-image-collab-"));
@@ -78,7 +76,9 @@ beforeAll(async () => {
   // simulate config.js: runtime config wins over build-time env
   (window as any).__EXCALIDRAW_RUNTIME_CONFIG__ = { storageBaseUrl: baseUrl };
   vi.resetModules();
-  ({ loadFilesFromFirebase } = await import("../data/firebase"));
+  ({ loadFilesFromFirebase, saveCollabFiles } = await import(
+    "../data/firebase"
+  ));
 });
 
 afterAll(async () => {
@@ -91,25 +91,40 @@ describe("image collaboration: A upload -> storage -> B recovery", () => {
     const roomKey = await generateEncryptionKey();
     expect(roomKey).toBeTruthy();
 
-    // ---- client A: encode exactly like FileManager.encodeFilesForUpload ----
-    const rawBuffer = new TextEncoder().encode(ORIGINAL_DATA_URL);
-    const encodedFile = await compressData<BinaryFileMetadata>(rawBuffer, {
-      encryptionKey: roomKey,
-      metadata: {
-        id: fileId,
-        mimeType: "image/png",
-        created: 12345,
-        lastRetrieved: 12345,
-      },
+    const fileData: BinaryFileData = {
+      id: fileId as FileId,
+      mimeType: "image/png",
+      dataURL: ORIGINAL_DATA_URL as BinaryFileData["dataURL"],
+      created: 12345,
+      lastRetrieved: 12345,
+    };
+    const files = { [fileId]: fileData } as BinaryFiles;
+    const pendingImage = {
+      id: "image-element",
+      type: "image",
+      fileId: fileId as FileId,
+      status: "pending",
+      isDeleted: false,
+    } as ExcalidrawElement;
+    const fileManagerA = new FileManager({
+      getFiles: async () => ({ loadedFiles: [], erroredFiles: new Map() }),
+      saveFiles: ({ addedFiles }) =>
+        saveCollabFiles({
+          prefix: `files/rooms/${roomId}`,
+          encryptionKey: roomKey,
+          maxBytes: 20 * 1024 * 1024,
+          addedFiles,
+        }),
     });
-
-    const backendA = new HttpStorageBackend(baseUrl);
-    const { savedFiles, erroredFiles } = await backendA.saveFiles(
-      `files/rooms/${roomId}`,
-      [{ id: fileId, buffer: encodedFile }],
+    const upload = await fileManagerA.saveFiles({
+      elements: [pendingImage],
+      files,
+    });
+    expect(upload.erroredFiles.size).toBe(0);
+    expect(upload.savedFiles.get(fileId as FileId)).toBe(fileData);
+    expect(fileManagerA.shouldUpdateImageElementStatus(pendingImage)).toBe(
+      true,
     );
-    expect(erroredFiles).toEqual([]);
-    expect(savedFiles).toEqual([fileId]);
 
     // ---- storage actually persisted the ciphertext file ----
     const diskPath = path.join(dataDir, "files", "rooms", roomId, fileId);
@@ -118,7 +133,7 @@ describe("image collaboration: A upload -> storage -> B recovery", () => {
     // the stored bytes must be the compressData payload (concatBuffers format:
     // version chunk 4 bytes = CONCAT_BUFFERS_VERSION(1) BE), NOT a bare
     // iv+ciphertext blob and NOT JSON/base64 wrapping
-    const onDisk = new Uint8Array(require("node:fs").readFileSync(diskPath));
+    const onDisk = new Uint8Array(readFileSync(diskPath));
     expect(onDisk[0]).toBe(0);
     expect(onDisk[1]).toBe(0);
     expect(onDisk[2]).toBe(0);
@@ -127,37 +142,33 @@ describe("image collaboration: A upload -> storage -> B recovery", () => {
     expect(storedText.startsWith("{")).toBe(false); // not JSON
     expect(storedText.startsWith("data:")).toBe(false); // not raw data URL
 
-    // ---- client B: download + decrypt + decompress (like loadFilesFromFirebase) ----
-    const backendB = new HttpStorageBackend(baseUrl);
-    const { loadedFiles, erroredFiles: errs } = await backendB.loadFiles(
-      `files/rooms/${roomId}`,
-      [fileId],
-    );
-    expect(errs).toEqual([]);
-    expect(loadedFiles).toHaveLength(1);
-    expect(loadedFiles[0].id).toBe(fileId);
+    const statuses: Array<[FileId, "loading" | "loaded" | "error"]> = [];
+    const fileManagerB = new FileManager({
+      onFileStatusChange: (updates) => statuses.push(...updates),
+      getFiles: (ids) =>
+        loadFilesFromFirebase(`files/rooms/${roomId}`, roomKey, ids),
+      saveFiles: async () => ({
+        savedFiles: new Map(),
+        erroredFiles: new Map(),
+      }),
+    });
+    const recovery = await fileManagerB.getFiles([fileId as FileId]);
+    const addedFiles: BinaryFiles = {};
+    for (const file of recovery.loadedFiles) {
+      addedFiles[file.id] = file;
+    }
 
-    const { data, metadata } = await decompressData<BinaryFileMetadata>(
-      loadedFiles[0].buffer,
-      { decryptionKey: roomKey },
-    );
-    const dataURL = new TextDecoder().decode(data);
-
-    // ---- recovered BinaryFileData matches the original ----
-    expect(dataURL).toBe(ORIGINAL_DATA_URL);
-    expect(metadata.mimeType).toBe("image/png");
-    expect(metadata.id).toBe(fileId);
-
-    const binaryFileData: BinaryFileData = {
-      mimeType: metadata.mimeType!,
+    expect(recovery.erroredFiles.size).toBe(0);
+    expect(addedFiles[fileId as FileId]).toMatchObject({
       id: fileId,
-      dataURL,
-      created: metadata.created!,
-      lastRetrieved: metadata.lastRetrieved!,
-    };
-    expect(binaryFileData.dataURL).toBe(ORIGINAL_DATA_URL);
-    expect(binaryFileData.mimeType).toBe("image/png");
-    expect(binaryFileData.id).toBe(fileId);
+      mimeType: "image/png",
+      dataURL: ORIGINAL_DATA_URL,
+    });
+    expect(statuses).toEqual([
+      [fileId, "loading"],
+      [fileId, "loaded"],
+    ]);
+    expect(statuses.some(([, status]) => status === "error")).toBe(false);
   });
 
   it("decryption with a WRONG key fails (proves encryption is really applied)", async () => {
@@ -165,10 +176,18 @@ describe("image collaboration: A upload -> storage -> B recovery", () => {
     const keyB = await generateEncryptionKey();
     expect(keyA).not.toBe(keyB);
 
-    const encoded = await compressData(new TextEncoder().encode(ORIGINAL_DATA_URL), {
-      encryptionKey: keyA,
-      metadata: { id: fileId, mimeType: "image/png", created: 1, lastRetrieved: 1 },
-    });
+    const encoded = await compressData(
+      new TextEncoder().encode(ORIGINAL_DATA_URL),
+      {
+        encryptionKey: keyA,
+        metadata: {
+          id: fileId,
+          mimeType: "image/png",
+          created: 1,
+          lastRetrieved: 1,
+        },
+      },
+    );
     const backend = new HttpStorageBackend(baseUrl);
     await backend.saveFiles(`files/rooms/${roomId}`, [
       { id: "b".repeat(40), buffer: encoded },
@@ -185,10 +204,18 @@ describe("image collaboration: A upload -> storage -> B recovery", () => {
     // A uploads (real encode pipeline)
     const roomKey = await generateEncryptionKey();
     const fileIdB = "c".repeat(40);
-    const encoded = await compressData(new TextEncoder().encode(ORIGINAL_DATA_URL), {
-      encryptionKey: roomKey,
-      metadata: { id: fileIdB, mimeType: "image/png", created: 99, lastRetrieved: 99 },
-    });
+    const encoded = await compressData(
+      new TextEncoder().encode(ORIGINAL_DATA_URL),
+      {
+        encryptionKey: roomKey,
+        metadata: {
+          id: fileIdB,
+          mimeType: "image/png",
+          created: 99,
+          lastRetrieved: 99,
+        },
+      },
+    );
     const backend = new HttpStorageBackend(baseUrl);
     const { erroredFiles: uploadErrors } = await backend.saveFiles(
       `files/rooms/${roomId}`,
@@ -201,7 +228,10 @@ describe("image collaboration: A upload -> storage -> B recovery", () => {
       onFileStatusChange: () => {},
       getFiles: async (fileIds: FileId[]) =>
         loadFilesFromFirebase(`files/rooms/${roomId}`, roomKey, fileIds),
-      saveFiles: async () => ({ savedFiles: new Map(), erroredFiles: new Map() }),
+      saveFiles: async () => ({
+        savedFiles: new Map(),
+        erroredFiles: new Map(),
+      }),
     });
 
     const { loadedFiles, erroredFiles } = await fileManager.getFiles([

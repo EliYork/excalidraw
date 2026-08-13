@@ -22,8 +22,6 @@ import {
 import { restoreElements } from "@excalidraw/excalidraw/data/restore";
 import { getSceneVersion } from "@excalidraw/element";
 
-import { getSyncableElements } from ".";
-
 import type { RemoteExcalidrawElement } from "@excalidraw/excalidraw/data/reconcile";
 import type {
   ExcalidrawElement,
@@ -37,10 +35,15 @@ import type {
   DataURL,
 } from "@excalidraw/excalidraw/types";
 
+import { storageBackend } from "./storage";
+
+import { encodeFilesForUpload } from "./FileManager";
+
+import { getSyncableElements } from ".";
+
 import type { SyncableExcalidrawElement } from ".";
 import type Portal from "../collab/Portal";
 import type { Socket } from "socket.io-client";
-import { storageBackend } from "./storage";
 
 // -----------------------------------------------------------------------------
 // The Firebase SDK is not used in self-hosted builds. This export exists only
@@ -78,7 +81,8 @@ const decryptElements = async (
   const ciphertext = data.ciphertext as Uint8Array<ArrayBuffer>;
   const iv = data.iv as Uint8Array<ArrayBuffer>;
 
-  const decrypted = await decryptData(iv, ciphertext, roomKey);  const decodedData = new TextDecoder("utf-8").decode(
+  const decrypted = await decryptData(iv, ciphertext, roomKey);
+  const decodedData = new TextDecoder("utf-8").decode(
     new Uint8Array(decrypted),
   );
   return JSON.parse(decodedData);
@@ -126,6 +130,45 @@ export const saveFilesToFirebase = async ({
   return {
     savedFiles: savedFiles as FileId[],
     erroredFiles: erroredFiles as FileId[],
+  };
+};
+
+/**
+ * Collaboration FileManager adapter. Keeping the encode + transport boundary
+ * here makes the runtime path independently testable without mounting Collab.
+ */
+export const saveCollabFiles = async ({
+  prefix,
+  encryptionKey,
+  maxBytes,
+  addedFiles,
+}: {
+  prefix: string;
+  encryptionKey: string;
+  maxBytes: number;
+  addedFiles: Map<FileId, BinaryFileData>;
+}) => {
+  const { savedFiles, erroredFiles } = await saveFilesToFirebase({
+    prefix,
+    files: await encodeFilesForUpload({
+      files: addedFiles,
+      encryptionKey,
+      maxBytes,
+    }),
+  });
+
+  const toFileMap = (fileIds: FileId[]) =>
+    fileIds.reduce((acc, id) => {
+      const fileData = addedFiles.get(id);
+      if (fileData) {
+        acc.set(id, fileData);
+      }
+      return acc;
+    }, new Map<FileId, BinaryFileData>());
+
+  return {
+    savedFiles: toFileMap(savedFiles),
+    erroredFiles: toFileMap(erroredFiles),
   };
 };
 
@@ -187,11 +230,7 @@ export const saveToFirebase = async (
     }
 
     const doc = await createFirebaseSceneDocument(elementsToStore, roomKey);
-    const result = await storageBackend.putScene(
-      roomId,
-      doc,
-      expectedEtag,
-    );
+    const result = await storageBackend.putScene(roomId, doc, expectedEtag);
 
     if (!result.ok) {
       // concurrent write won; re-read and retry with fresh data
@@ -271,14 +310,9 @@ export const loadFilesFromFirebase = async (
           created: metadata?.created || Date.now(),
           lastRetrieved: metadata?.created || Date.now(),
         });
-
-        console.debug(
-          `[collab] file ${id} recovered: mimeType=${metadata?.mimeType}, ` +
-            `dataURL=${dataURL.slice(0, 40)}… (${dataURL.length} chars)`,
-        );
       } catch (error: any) {
         erroredFiles.set(id as FileId, true);
-        console.error(`[collab] file ${id} decrypt/decompress FAILED`, error);
+        console.error(error);
       }
     }),
   );

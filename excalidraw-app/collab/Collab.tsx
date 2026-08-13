@@ -38,12 +38,10 @@ import type {
 import type { ImportedDataState } from "@excalidraw/excalidraw/data/types";
 import type {
   ExcalidrawElement,
-  FileId,
   InitializedExcalidrawImageElement,
   OrderedExcalidrawElement,
 } from "@excalidraw/element/types";
 import type {
-  BinaryFileData,
   ExcalidrawImperativeAPI,
   SocketId,
   Collaborator,
@@ -69,18 +67,14 @@ import {
   getSyncableElements,
 } from "../data";
 import { WS_SERVER_URL } from "../data/runtimeConfig";
-import {
-  encodeFilesForUpload,
-  FileManager,
-  updateStaleImageStatuses,
-} from "../data/FileManager";
+import { FileManager, updateStaleImageStatuses } from "../data/FileManager";
 import { FileStatusStore } from "../data/fileStatusStore";
 import { LocalData } from "../data/LocalData";
 import {
   isSavedToFirebase,
   loadFilesFromFirebase,
   loadFromFirebase,
-  saveFilesToFirebase,
+  saveCollabFiles,
   saveToFirebase,
 } from "../data/firebase";
 import {
@@ -175,37 +169,12 @@ class Collab extends PureComponent<CollabProps, CollabState> {
           throw new AbortError();
         }
 
-        const { savedFiles, erroredFiles } = await saveFilesToFirebase({
+        return saveCollabFiles({
           prefix: `${FIREBASE_STORAGE_PREFIXES.collabFiles}/${roomId}`,
-          files: await encodeFilesForUpload({
-            files: addedFiles,
-            encryptionKey: roomKey,
-            maxBytes: FILE_UPLOAD_MAX_BYTES,
-          }),
+          addedFiles,
+          encryptionKey: roomKey,
+          maxBytes: FILE_UPLOAD_MAX_BYTES,
         });
-
-        return {
-          savedFiles: savedFiles.reduce(
-            (acc: Map<FileId, BinaryFileData>, id) => {
-              const fileData = addedFiles.get(id);
-              if (fileData) {
-                acc.set(id, fileData);
-              }
-              return acc;
-            },
-            new Map(),
-          ),
-          erroredFiles: erroredFiles.reduce(
-            (acc: Map<FileId, BinaryFileData>, id) => {
-              const fileData = addedFiles.get(id);
-              if (fileData) {
-                acc.set(id, fileData);
-              }
-              return acc;
-            },
-            new Map(),
-          ),
-        };
       },
     });
     this.excalidrawAPI = props.excalidrawAPI;

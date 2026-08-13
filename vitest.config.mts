@@ -74,6 +74,9 @@ export default defineConfig({
   },
   //@ts-ignore
   test: {
+    // Storage uses Node's built-in test runner; don't collect those files as
+    // Vitest suites when running the monorepo-wide app tests.
+    exclude: ["docker/storage/test/**", "**/node_modules/**"],
     // Since hooks are running in stack in v2, which means all hooks run serially whereas
     // we need to run them in parallel
     sequence: {

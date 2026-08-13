@@ -1,11 +1,10 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 
-import {
-  HttpStorageBackend,
-  parsePrefix,
-} from "../data/storage/httpBackend";
+import { HttpStorageBackend, parsePrefix } from "../data/storage/httpBackend";
 
 const base = "http://storage.test";
+const encoded = (suffix: string) =>
+  new Uint8Array([0, 0, 0, 1, ...new TextEncoder().encode(suffix)]);
 
 const jsonResponse = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), {
@@ -40,13 +39,17 @@ describe("parsePrefix", () => {
 
 describe("HttpStorageBackend.getScene", () => {
   it("returns null on 404", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 404 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 404 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const backend = new HttpStorageBackend(base);
     const scene = await backend.getScene("0123456789abcdef0123");
     expect(scene).toBeNull();
-    expect(fetchMock).toHaveBeenCalledWith("http://storage.test/api/v2/scenes/0123456789abcdef0123");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://storage.test/api/v2/scenes/0123456789abcdef0123",
+    );
   });
 
   it("decodes base64 fields and etag", async () => {
@@ -73,7 +76,9 @@ describe("HttpStorageBackend.getScene", () => {
 
 describe("HttpStorageBackend.putScene", () => {
   it("sends If-Match and base64 body; returns etag", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { etag: "8-9999" }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { etag: "8-9999" }));
     vi.stubGlobal("fetch", fetchMock);
 
     const backend = new HttpStorageBackend(base);
@@ -131,22 +136,42 @@ describe("HttpStorageBackend.saveFiles", () => {
 
     const backend = new HttpStorageBackend(base);
     const result = await backend.saveFiles("files/rooms/0123456789abcdef0123", [
-      { id: "a".repeat(40), buffer: new TextEncoder().encode("one") },
-      { id: "b".repeat(40), buffer: new TextEncoder().encode("two") },
+      { id: "a".repeat(40), buffer: encoded("one") },
+      { id: "b".repeat(40), buffer: encoded("two") },
     ]);
 
     expect(result.savedFiles).toEqual(["a".repeat(40)]);
     expect(result.erroredFiles).toEqual(["b".repeat(40)]);
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://storage.test/api/v2/files/rooms/0123456789abcdef0123/" + "a".repeat(40),
+      `http://storage.test/api/v2/files/rooms/0123456789abcdef0123/${"a".repeat(
+        40,
+      )}`,
     );
   });
 
   it("rejects invalid prefix", async () => {
     const backend = new HttpStorageBackend(base);
     await expect(
-      backend.saveFiles("bogus/prefix", [{ id: "a".repeat(40), buffer: new Uint8Array() }]),
+      backend.saveFiles("bogus/prefix", [
+        { id: "a".repeat(40), buffer: new Uint8Array() },
+      ]),
     ).rejects.toThrow("invalid file prefix");
+  });
+
+  it("rejects a non-compressData payload before making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = new HttpStorageBackend(base);
+
+    const result = await backend.saveFiles("files/rooms/0123456789abcdef0123", [
+      { id: "a".repeat(40), buffer: new Uint8Array([1, 2, 3, 4]) },
+    ]);
+
+    expect(result).toEqual({
+      savedFiles: [],
+      erroredFiles: ["a".repeat(40)],
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -154,7 +179,9 @@ describe("HttpStorageBackend.loadFiles", () => {
   it("dedupes ids, decodes buffers, collects errors", async () => {
     const fetchMock = vi.fn().mockImplementation(async (url) => {
       if (url.endsWith("a".repeat(40))) {
-        return new Response(new TextEncoder().encode("blob-a"), { status: 200 });
+        return new Response(new TextEncoder().encode("blob-a"), {
+          status: 200,
+        });
       }
       return new Response(null, { status: 404 });
     });
@@ -168,7 +195,9 @@ describe("HttpStorageBackend.loadFiles", () => {
     ]);
 
     expect(result.loadedFiles).toHaveLength(1);
-    expect(new TextDecoder().decode(result.loadedFiles[0].buffer)).toBe("blob-a");
+    expect(new TextDecoder().decode(result.loadedFiles[0].buffer)).toBe(
+      "blob-a",
+    );
     expect(result.erroredFiles).toEqual(["b".repeat(40)]);
     // deduped: only 2 fetches despite 3 ids
     expect(fetchMock).toHaveBeenCalledTimes(2);

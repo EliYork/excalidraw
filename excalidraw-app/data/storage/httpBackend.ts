@@ -77,7 +77,9 @@ export class HttpStorageBackend implements StorageBackend {
     scene: StoredScene,
     expectedEtag: string | null,
   ): Promise<{ ok: true; etag: string } | { ok: false; conflict: true }> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     if (expectedEtag !== null) {
       headers["If-Match"] = expectedEtag;
     }
@@ -114,26 +116,20 @@ export class HttpStorageBackend implements StorageBackend {
 
     await Promise.all(
       files.map(async ({ id, buffer }) => {
+        const isCompressData =
+          buffer.byteLength >= 4 &&
+          buffer[0] === 0 &&
+          buffer[1] === 0 &&
+          buffer[2] === 0 &&
+          buffer[3] === 1;
+        if (!isCompressData) {
+          erroredFiles.push(id);
+          return;
+        }
+
         try {
-          // defensive check: the official pipeline (FileManager.encodeFilesForUpload
-          // -> compressData) always produces a concatBuffers payload starting with
-          // version chunk 00 00 00 01. A bare iv+ciphertext blob here means the
-          // remote client will fail to decode it — log loudly instead of silently
-          // persisting broken data.
-          const isCompressData =
-            buffer.byteLength >= 4 &&
-            buffer[0] === 0 &&
-            buffer[1] === 0 &&
-            buffer[2] === 0 &&
-            buffer[3] === 1;
-          if (!isCompressData) {
-            console.error(
-              `[storage] WARNING: file ${id} is NOT compressData format ` +
-                `(${buffer.byteLength}B, first bytes ${Array.from(
-                  buffer.slice(0, 4),
-                ).join(",")}) — remote clients will fail to decode it`,
-            );
-          }
+          // Fail before persisting a payload that the collaboration download
+          // path cannot decode. The storage service itself remains opaque.
           const res = await fetch(this.url(`/files/${kind}/${ownerId}/${id}`), {
             method: "PUT",
             // slice() copies into a fresh ArrayBuffer (typed-array generics)
@@ -157,7 +153,10 @@ export class HttpStorageBackend implements StorageBackend {
   async loadFiles(
     prefix: string,
     fileIds: readonly string[],
-  ): Promise<{ loadedFiles: { id: string; buffer: Uint8Array }[]; erroredFiles: string[] }> {
+  ): Promise<{
+    loadedFiles: { id: string; buffer: Uint8Array }[];
+    erroredFiles: string[];
+  }> {
     const parsed = parsePrefix(prefix);
     if (!parsed) {
       throw new Error(`storage: invalid file prefix "${prefix}"`);
@@ -169,22 +168,15 @@ export class HttpStorageBackend implements StorageBackend {
     await Promise.all(
       [...new Set(fileIds)].map(async (id) => {
         try {
-          const url = this.url(`/files/${kind}/${ownerId}/${id}`);
-          const res = await fetch(url);
+          const res = await fetch(this.url(`/files/${kind}/${ownerId}/${id}`));
           if (res.ok) {
             const buffer = new Uint8Array(await res.arrayBuffer());
             loadedFiles.push({ id, buffer });
-            console.debug(
-              `[storage] GET ${url} -> 200, ${buffer.byteLength} bytes`,
-            );
           } else {
-            console.warn(
-              `[storage] GET ${url} -> ${res.status} (${res.statusText})`,
-            );
             erroredFiles.push(id);
           }
         } catch (error) {
-          console.error(`[storage] GET failed for ${id}`, error);
+          console.error(error);
           erroredFiles.push(id);
         }
       }),

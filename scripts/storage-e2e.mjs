@@ -16,7 +16,8 @@ import { deflateSync, inflateSync } from "node:zlib";
 
 const BASE = process.argv[2] || "http://localhost:8080";
 // random ids per run so re-runs never collide with leftover data
-const randHex = (bytes) => Buffer.from(webcrypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
+const randHex = (bytes) =>
+  Buffer.from(webcrypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
 const ROOM_ID = randHex(10); // 20 hex chars
 const ROOM_ID2 = randHex(10);
 const FILE_ID = randHex(20); // 40 hex chars
@@ -24,6 +25,32 @@ const FILE_ID = randHex(20); // 40 hex chars
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
 const b64 = (buf) => Buffer.from(buf).toString("base64");
 const unb64 = (str) => Buffer.from(str, "base64");
+
+const concatBuffers = (...chunks) => {
+  const parts = [Buffer.alloc(4)];
+  parts[0].writeUInt32BE(1);
+  for (const chunk of chunks) {
+    const size = Buffer.alloc(4);
+    size.writeUInt32BE(chunk.length);
+    parts.push(size, Buffer.from(chunk));
+  }
+  return Buffer.concat(parts);
+};
+
+const splitBuffers = (buffer) => {
+  const data = Buffer.from(buffer);
+  if (data.readUInt32BE(0) !== 1) {
+    throw new Error("unsupported concatBuffers version");
+  }
+  const chunks = [];
+  for (let cursor = 4; cursor < data.length; ) {
+    const size = data.readUInt32BE(cursor);
+    cursor += 4;
+    chunks.push(data.subarray(cursor, cursor + size));
+    cursor += size;
+  }
+  return chunks;
+};
 
 // --- client-side crypto mirroring packages/excalidraw/data/encryption.ts ---
 const generateRoomKey = async () => {
@@ -121,7 +148,11 @@ console.log("== scene roundtrip (encrypted elements) ==");
   const stored = await res.json();
   check("sceneVersion preserved", stored.sceneVersion === sceneVersion);
   check("etag matches", stored.etag === etag);
-  const decrypted = await decrypt(key, unb64(stored.iv), unb64(stored.ciphertext));
+  const decrypted = await decrypt(
+    key,
+    unb64(stored.iv),
+    unb64(stored.ciphertext),
+  );
   const loaded = JSON.parse(new TextDecoder().decode(decrypted));
   check(
     "elements roundtrip intact",
@@ -134,17 +165,27 @@ console.log("== file roundtrip (deflate + AES-GCM) ==");
 {
   const key = await generateRoomKey();
   const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
-  const metadata = JSON.stringify({ id: FILE_ID, mimeType: "image/png", created: 123 });
-  const payload = Buffer.concat([
-    Buffer.from(metadata),
-    Buffer.from(dataURL),
-  ]);
+  const metadata = Buffer.from(
+    JSON.stringify({ id: FILE_ID, mimeType: "image/png", created: 123 }),
+  );
+  const payload = concatBuffers(metadata, Buffer.from(dataURL));
   const compressed = deflateSync(payload);
   const { iv, ciphertext } = await encrypt(key, compressed);
+  const encodedFile = concatBuffers(
+    Buffer.from(
+      JSON.stringify({
+        version: 2,
+        compression: "pako@1",
+        encryption: "AES-GCM",
+      }),
+    ),
+    iv,
+    ciphertext,
+  );
 
   let res = await fetch(api(`/files/rooms/${ROOM_ID}/${FILE_ID}`), {
     method: "PUT",
-    body: ciphertext,
+    body: encodedFile,
   });
   check("upload file -> 200", res.status === 200, `got ${res.status}`);
 
@@ -156,12 +197,18 @@ console.log("== file roundtrip (deflate + AES-GCM) ==");
     `got ${res.headers.get("cache-control")}`,
   );
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const decrypted = await decrypt(key, iv, bytes);
+  const [encodingMetadata, storedIv, storedCiphertext] = splitBuffers(bytes);
+  check(
+    "compressData envelope preserved",
+    JSON.parse(encodingMetadata.toString()).version === 2 &&
+      storedIv.length === 12,
+  );
+  const decrypted = await decrypt(key, storedIv, storedCiphertext);
   const inflated = inflateSync(decrypted);
-  const text = inflated.toString("utf8");
+  const [storedMetadata, storedDataURL] = splitBuffers(inflated);
   check(
     "file bytes roundtrip intact",
-    text === `${metadata}${dataURL}`,
+    storedMetadata.equals(metadata) && storedDataURL.toString() === dataURL,
     "content mismatch",
   );
 }
@@ -194,8 +241,14 @@ console.log("== concurrent scene save (CAS) ==");
   const baseDoc = await res.json();
 
   // A saves first (with etag)
-  const aElements = [{ id: "base", version: 1 }, { id: "fromA", version: 2 }];
-  const encA = await encrypt(key, new TextEncoder().encode(JSON.stringify(aElements)));
+  const aElements = [
+    { id: "base", version: 1 },
+    { id: "fromA", version: 2 },
+  ];
+  const encA = await encrypt(
+    key,
+    new TextEncoder().encode(JSON.stringify(aElements)),
+  );
   res = await fetch(api(`/scenes/${ROOM_ID2}`), {
     method: "PUT",
     headers: { "Content-Type": "application/json", "If-Match": baseDoc.etag },
@@ -208,8 +261,14 @@ console.log("== concurrent scene save (CAS) ==");
   check("A saves with etag -> 200", res.status === 200, `got ${res.status}`);
 
   // B tries with the STALE etag -> must get 409
-  const bElements = [{ id: "base", version: 1 }, { id: "fromB", version: 2 }];
-  const encB = await encrypt(key, new TextEncoder().encode(JSON.stringify(bElements)));
+  const bElements = [
+    { id: "base", version: 1 },
+    { id: "fromB", version: 2 },
+  ];
+  const encB = await encrypt(
+    key,
+    new TextEncoder().encode(JSON.stringify(bElements)),
+  );
   res = await fetch(api(`/scenes/${ROOM_ID2}`), {
     method: "PUT",
     headers: { "Content-Type": "application/json", "If-Match": baseDoc.etag },
@@ -225,10 +284,15 @@ console.log("== concurrent scene save (CAS) ==");
   res = await fetch(api(`/scenes/${ROOM_ID2}`));
   const fresh = await res.json();
   const freshElements = JSON.parse(
-    new TextDecoder().decode(await decrypt(key, unb64(fresh.iv), unb64(fresh.ciphertext))),
+    new TextDecoder().decode(
+      await decrypt(key, unb64(fresh.iv), unb64(fresh.ciphertext)),
+    ),
   );
   const merged = [...freshElements, { id: "fromB", version: 2 }];
-  const encMerged = await encrypt(key, new TextEncoder().encode(JSON.stringify(merged)));
+  const encMerged = await encrypt(
+    key,
+    new TextEncoder().encode(JSON.stringify(merged)),
+  );
   res = await fetch(api(`/scenes/${ROOM_ID2}`), {
     method: "PUT",
     headers: { "Content-Type": "application/json", "If-Match": fresh.etag },
@@ -238,16 +302,26 @@ console.log("== concurrent scene save (CAS) ==");
       ciphertext: b64(encMerged.ciphertext),
     }),
   });
-  check("B retry with fresh etag -> 200", res.status === 200, `got ${res.status}`);
+  check(
+    "B retry with fresh etag -> 200",
+    res.status === 200,
+    `got ${res.status}`,
+  );
 
   // final state contains both edits
   res = await fetch(api(`/scenes/${ROOM_ID2}`));
   const finalDoc = await res.json();
   const finalElements = JSON.parse(
-    new TextDecoder().decode(await decrypt(key, unb64(finalDoc.iv), unb64(finalDoc.ciphertext))),
+    new TextDecoder().decode(
+      await decrypt(key, unb64(finalDoc.iv), unb64(finalDoc.ciphertext)),
+    ),
   );
   const ids = finalElements.map((e) => e.id).sort();
-  check("merged scene has both edits", JSON.stringify(ids) === JSON.stringify(["base", "fromA", "fromB"]), `got ${ids}`);
+  check(
+    "merged scene has both edits",
+    JSON.stringify(ids) === JSON.stringify(["base", "fromA", "fromB"]),
+    `got ${ids}`,
+  );
 }
 
 console.log("");

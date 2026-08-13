@@ -18,12 +18,17 @@ server {
     root   /usr/share/nginx/html;
     index  index.html;
 
-    # allow slightly larger bodies than the app's 4 MiB pre-compression limit
-    client_max_body_size 12m;
+    # Generated from the same runtime value used by the frontend and storage.
+    client_max_body_size ${MAX_FILE_UPLOAD_BYTES};
 
     location / {
         try_files $uri $uri/ /index.html;
         add_header Cache-Control "no-cache";
+    }
+
+    # Generated at container startup and must never be reused across deploys.
+    location = /config.js {
+        add_header Cache-Control "no-store";
     }
 
     location /api/v2/ {

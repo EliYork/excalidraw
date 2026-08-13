@@ -20,7 +20,6 @@ import {
   existsSync,
   renameSync,
   mkdirSync,
-  readFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -32,9 +31,9 @@ import { fileRelPath, isRoomId, isFileId, isValidKind } from "./validate.js";
 const DATA_DIR = process.env.DATA_DIR || "./data";
 const PORT = Number(process.env.PORT || 8080);
 
-// Official client limit is 4 MiB pre-compression; allow headroom for
-// compression overhead and share-link payloads.
-const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
+// Must match the self-hosted frontend default. Compose/runtime configuration
+// can override both sides with MAX_FILE_UPLOAD_BYTES / MAX_BODY_BYTES.
+const DEFAULT_MAX_BODY_BYTES = 20 * 1024 * 1024;
 const CACHE_MAX_AGE = "public, max-age=31536000"; // 1 year, mirrors FILE_CACHE_MAX_AGE_SEC
 
 const sendJson = (res, status, obj) => {
@@ -143,7 +142,6 @@ export function createApp({ dataDir = DATA_DIR, maxBodyBytes = DEFAULT_MAX_BODY_
 
   return { server, store };
 }
-
 async function handleScenes(req, res, store, roomId, method, maxBodyBytes) {
   if (!isRoomId(roomId)) {
     return sendError(res, 400, "invalid roomId");
@@ -249,17 +247,6 @@ async function handleFiles(req, res, store, kind, ownerId, fileId, method, maxBo
 
     renameSync(tmpPath, absPath);
     store.upsertFileMeta(kind, ownerId, fileId, size);
-
-    // diagnostic: log the wire format so mis-encoded uploads are visible in
-    // server logs (compressData output must start with concatBuffers version
-    // chunk 00 00 00 01)
-    let firstBytes = "";
-    try {
-      firstBytes = Array.from(readFileSync(absPath).subarray(0, 4)).join(",");
-    } catch {}
-    console.log(
-      `PUT /api/v2/files/${kind}/${ownerId}/${fileId} 200 ${size}B hdr=[${firstBytes}]`,
-    );
 
     return sendJson(res, 200, { ok: true, size });
   }
