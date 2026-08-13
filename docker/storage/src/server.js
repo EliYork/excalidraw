@@ -14,6 +14,7 @@
 //   - Server never sees plaintext (scenes/files are client-encrypted).
 //   - Logs never contain bodies.
 import http from "node:http";
+import { createHash } from "node:crypto";
 import {
   createReadStream,
   createWriteStream,
@@ -26,7 +27,16 @@ import {
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { Store, ensureDataDir } from "./db.js";
-import { fileRelPath, isRoomId, isFileId, isValidKind } from "./validate.js";
+import {
+  fileRelPath,
+  isRoomId,
+  isFileId,
+  isValidKind,
+  isManageTokenHash,
+  isKdfVersion,
+  isKdfIterations,
+  isRoomName,
+} from "./validate.js";
 
 const DATA_DIR = process.env.DATA_DIR || "./data";
 const PORT = Number(process.env.PORT || 8080);
@@ -71,11 +81,18 @@ const unb64 = (str) => {
   if (typeof str !== "string") {
     return null;
   }
+  // Strict roundtrip check: reject strings that only partially decode
+  // (e.g. "!!!not-base64" or a missing "=" padding), not just garbage input.
+  let buf;
   try {
-    return Buffer.from(str, "base64");
+    buf = Buffer.from(str, "base64");
   } catch {
     return null;
   }
+  if (buf.length === 0 || buf.toString("base64") !== str) {
+    return null;
+  }
+  return buf;
 };
 
 export function createApp({ dataDir = DATA_DIR, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, log = true } = {}) {
@@ -93,7 +110,7 @@ export function createApp({ dataDir = DATA_DIR, maxBodyBytes = DEFAULT_MAX_BODY_
     // permissive policy is acceptable and required for cross-origin dev setups
     // (the default same-origin deployment never triggers CORS).
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, PUT, PATCH, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, If-Match");
 
     if (method === "OPTIONS") {
@@ -122,6 +139,19 @@ export function createApp({ dataDir = DATA_DIR, maxBodyBytes = DEFAULT_MAX_BODY_
       const fileMatch = pathname.match(/^\/api\/v2\/files\/([^/]+)\/([^/]+)\/([^/]+)$/);
       if (fileMatch) {
         return await handleFiles(req, res, store, fileMatch[1], fileMatch[2], fileMatch[3], method, maxBodyBytes, filePathFor);
+      }
+
+      // Lobby Registry
+      if (pathname === "/api/v2/rooms") {
+        return await handleLobbyCollection(req, res, store, method, maxBodyBytes);
+      }
+      const roomOpenMatch = pathname.match(/^\/api\/v2\/rooms\/([^/]+)\/open$/);
+      if (roomOpenMatch) {
+        return await handleLobbyRoomOpen(req, res, store, roomOpenMatch[1], method);
+      }
+      const roomMatch = pathname.match(/^\/api\/v2\/rooms\/([^/]+)$/);
+      if (roomMatch) {
+        return await handleLobbyRoom(req, res, store, roomMatch[1], method, maxBodyBytes);
       }
 
       return sendError(res, 404, "not found");
@@ -251,6 +281,221 @@ async function handleFiles(req, res, store, kind, ownerId, fileId, method, maxBo
     return sendJson(res, 200, { ok: true, size });
   }
   return sendError(res, 405, "method not allowed");
+}
+
+// -----------------------------------------------------------------------------
+// Lobby Registry
+// -----------------------------------------------------------------------------
+//
+// The lobby is a permanent room directory. Rooms are created by clients that
+// already own a roomKey; the server only stores key material wrapped with a
+// key derived from the lobby password (PBKDF2-SHA256 + AES-GCM), plus a
+// SHA-256 hash of the manage token. Password verification is implicit: the
+// client unwraps the roomKey locally and the operation either succeeds (correct
+// password) or fails (wrong password). The server can never recover a roomKey.
+//
+//   POST /api/v2/rooms            create lobby room (client-generated roomId)
+//   GET  /api/v2/rooms            list (public metadata only)
+//   GET  /api/v2/rooms/:roomId    room details incl. wrapped key material
+//   POST /api/v2/rooms/:roomId/open  report a successful join (updates lastOpenedAt)
+//   PATCH /api/v2/rooms/:roomId   owner-only update (manageToken verified)
+
+const serializeLobbyRoom = (room) => ({
+  roomId: room.roomId,
+  name: room.name,
+  createdAt: room.createdAt,
+  lastOpenedAt: room.lastOpenedAt,
+  hasPassword: !!room.hasPassword,
+  wrappedRoomKey: b64(room.wrappedRoomKey),
+  passwordSalt: b64(room.passwordSalt),
+  passwordIv: b64(room.passwordIv),
+  kdfVersion: room.kdfVersion,
+  kdfIterations: room.kdfIterations,
+});
+
+async function handleLobbyCollection(req, res, store, method, maxBodyBytes) {
+  if (method === "GET") {
+    const rooms = store.listLobbyRooms().map((room) => ({
+      roomId: room.roomId,
+      name: room.name,
+      createdAt: room.createdAt,
+      lastOpenedAt: room.lastOpenedAt,
+      hasPassword: !!room.hasPassword,
+    }));
+    return sendJson(res, 200, { rooms });
+  }
+
+  if (method === "POST") {
+    const raw = await readBody(req, maxBodyBytes);
+    let payload;
+    try {
+      payload = JSON.parse(raw.toString("utf8"));
+    } catch {
+      return sendError(res, 400, "invalid JSON body");
+    }
+
+    const roomId = payload.roomId;
+    const wrappedRoomKey = unb64(payload.wrappedRoomKey);
+    const passwordSalt = unb64(payload.passwordSalt);
+    const passwordIv = unb64(payload.passwordIv);
+    const kdfVersion = payload.kdfVersion;
+    const kdfIterations = payload.kdfIterations;
+    const manageTokenHash = payload.manageTokenHash;
+
+    if (!isRoomId(roomId)) {
+      return sendError(res, 400, "invalid roomId");
+    }
+    if (!isRoomName(payload.name)) {
+      return sendError(res, 400, "invalid name");
+    }
+    if (!wrappedRoomKey || wrappedRoomKey.length === 0 || wrappedRoomKey.length > 1024) {
+      return sendError(res, 400, "invalid wrappedRoomKey");
+    }
+    if (!passwordSalt || passwordSalt.length < 8 || passwordSalt.length > 128) {
+      return sendError(res, 400, "invalid passwordSalt");
+    }
+    if (!passwordIv || passwordIv.length !== 12) {
+      return sendError(res, 400, "invalid passwordIv");
+    }
+    if (!isKdfVersion(kdfVersion)) {
+      return sendError(res, 400, "unsupported kdfVersion");
+    }
+    if (!isKdfIterations(kdfIterations)) {
+      return sendError(res, 400, "invalid kdfIterations");
+    }
+    if (!isManageTokenHash(manageTokenHash)) {
+      return sendError(res, 400, "invalid manageTokenHash");
+    }
+
+    const result = store.createLobbyRoom({
+      roomId,
+      name: payload.name.trim(),
+      wrappedRoomKey,
+      passwordSalt,
+      passwordIv,
+      kdfVersion,
+      kdfIterations,
+      manageTokenHash,
+      hasPassword: payload.hasPassword !== false,
+    });
+    if (!result.ok) {
+      return sendError(res, 409, "room already registered");
+    }
+    return sendJson(res, 200, { roomId });
+  }
+
+  return sendError(res, 405, "method not allowed");
+}
+
+async function handleLobbyRoom(req, res, store, roomId, method, maxBodyBytes) {
+  // `presence` and other non-room paths under /api/v2/rooms/ are served by
+  // the room service; this backend only knows real 20-hex room ids.
+  if (!isRoomId(roomId)) {
+    return sendError(res, 404, "not found");
+  }
+
+  if (method === "GET") {
+    const room = store.getLobbyRoom(roomId);
+    if (!room) {
+      return sendError(res, 404, "room not found");
+    }
+    return sendJson(res, 200, serializeLobbyRoom(room));
+  }
+
+  if (method === "PATCH") {
+    const raw = await readBody(req, maxBodyBytes);
+    let payload;
+    try {
+      payload = JSON.parse(raw.toString("utf8"));
+    } catch {
+      return sendError(res, 400, "invalid JSON body");
+    }
+
+    // Owner verification: the SHA-256 hash of the presented manage token must
+    // match the stored hash. The token itself is never stored.
+    const manageToken = payload.manageToken;
+    if (typeof manageToken !== "string" || !/^[a-f0-9]{16,128}$/.test(manageToken)) {
+      return sendError(res, 400, "invalid manageToken");
+    }
+    const room = store.getLobbyRoom(roomId);
+    if (!room) {
+      return sendError(res, 404, "room not found");
+    }
+    const presentedHash = createHash("sha256").update(manageToken, "utf8").digest("hex");
+    if (presentedHash !== room.manageTokenHash) {
+      return sendError(res, 403, "invalid manage token");
+    }
+
+    const fields = {};
+    if (payload.name !== undefined) {
+      if (!isRoomName(payload.name)) {
+        return sendError(res, 400, "invalid name");
+      }
+      fields.name = payload.name.trim();
+    }
+
+    // Password rotation: the client re-wraps the roomKey with a KEK derived
+    // from the new password, so all key-material fields must come together.
+    const hasKeyMaterial =
+      payload.wrappedRoomKey !== undefined ||
+      payload.passwordSalt !== undefined ||
+      payload.passwordIv !== undefined ||
+      payload.kdfVersion !== undefined ||
+      payload.kdfIterations !== undefined;
+    if (hasKeyMaterial) {
+      const wrappedRoomKey = unb64(payload.wrappedRoomKey);
+      const passwordSalt = unb64(payload.passwordSalt);
+      const passwordIv = unb64(payload.passwordIv);
+      const kdfVersion = payload.kdfVersion;
+      const kdfIterations = payload.kdfIterations;
+      if (!wrappedRoomKey || wrappedRoomKey.length === 0 || wrappedRoomKey.length > 1024) {
+        return sendError(res, 400, "invalid wrappedRoomKey");
+      }
+      if (!passwordSalt || passwordSalt.length < 8 || passwordSalt.length > 128) {
+        return sendError(res, 400, "invalid passwordSalt");
+      }
+      if (!passwordIv || passwordIv.length !== 12) {
+        return sendError(res, 400, "invalid passwordIv");
+      }
+      if (!isKdfVersion(kdfVersion)) {
+        return sendError(res, 400, "unsupported kdfVersion");
+      }
+      if (!isKdfIterations(kdfIterations)) {
+        return sendError(res, 400, "invalid kdfIterations");
+      }
+      fields.wrappedRoomKey = wrappedRoomKey;
+      fields.passwordSalt = passwordSalt;
+      fields.passwordIv = passwordIv;
+      fields.kdfVersion = kdfVersion;
+      fields.kdfIterations = kdfIterations;
+      fields.hasPassword = payload.hasPassword !== false;
+    } else if (payload.hasPassword !== undefined) {
+      fields.hasPassword = payload.hasPassword !== false;
+    }
+
+    if (Object.keys(fields).length === 0) {
+      return sendError(res, 400, "nothing to update");
+    }
+    store.updateLobbyRoom(roomId, fields);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  return sendError(res, 405, "method not allowed");
+}
+
+async function handleLobbyRoomOpen(req, res, store, roomId, method) {
+  if (!isRoomId(roomId)) {
+    return sendError(res, 404, "not found");
+  }
+  if (method !== "POST") {
+    return sendError(res, 405, "method not allowed");
+  }
+  // Successful-join report. lastOpenedAt is a pure sort signal (the server
+  // cannot verify a password it never stored), so no credentials are needed.
+  if (!store.touchLobbyRoom(roomId)) {
+    return sendError(res, 404, "room not found");
+  }
+  return sendJson(res, 200, { ok: true });
 }
 
 // CLI entry: `node src/server.js`

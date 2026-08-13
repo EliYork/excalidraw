@@ -49,6 +49,25 @@ try {
     allowEIO3: true,
   });
 
+  // Lobby presence: live active-connection counts per collaboration room.
+  // Derived from the socket adapter at request time — never persisted. The
+  // frontend polls this endpoint every ~5s while the lobby is open.
+  // Registered after `io` exists; nginx routes /api/v2/rooms/presence here
+  // (exact location match), while the storage service serves everything else
+  // under /api/v2/.
+  app.get("/api/v2/rooms/presence", (_req, res) => {
+    const counts: Record<string, number> = {};
+    const rooms = io.sockets.adapter.rooms;
+    for (const [roomName, sockets] of rooms) {
+      // collaboration room ids are 10 random bytes hex (20 chars); this
+      // excludes per-socket rooms and follow@ rooms
+      if (/^[a-f0-9]{20}$/.test(roomName)) {
+        counts[roomName] = sockets.size;
+      }
+    }
+    res.json(counts);
+  });
+
   io.on("connection", (socket) => {
     ioDebug("connection established!");
     io.to(`${socket.id}`).emit("init-room");

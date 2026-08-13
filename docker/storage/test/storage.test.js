@@ -1,6 +1,7 @@
 // Storage backend tests (node:test, zero deps). Run: node --test test/
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -245,5 +246,266 @@ test("data persists across restart (same data dir)", async () => {
     }
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Lobby Registry
+// ---------------------------------------------------------------------------
+
+const b64 = (buf) => Buffer.from(buf).toString("base64");
+
+// Test owner credentials: the client-side manage token is "a"*64 and the
+// registry stores only its SHA-256 digest — exactly what the real flow does.
+const MANAGE_TOKEN = "a".repeat(64);
+const MANAGE_TOKEN_HASH = createHash("sha256").update(MANAGE_TOKEN, "utf8").digest("hex");
+
+const roomBody = (overrides = {}) => ({
+  roomId: ROOM,
+  name: "未命名画布",
+  wrappedRoomKey: b64(Buffer.from("wrapped-room-key-ciphertext")),
+  passwordSalt: b64(Buffer.from("0123456789abcdef")), // 16 bytes
+  passwordIv: b64(Buffer.from("123456789012")), // 12 bytes
+  kdfVersion: 1,
+  kdfIterations: 210000,
+  manageTokenHash: MANAGE_TOKEN_HASH,
+  ...overrides,
+});
+
+test("lobby: create, list and get roundtrip", async () => {
+  const s = await startServer();
+  try {
+    const create = await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+    assert.equal(create.status, 200);
+    assert.deepEqual(await create.json(), { roomId: ROOM });
+
+    const list = await fetch(`${s.base}/api/v2/rooms`);
+    assert.equal(list.status, 200);
+    const { rooms } = await list.json();
+    assert.equal(rooms.length, 1);
+    assert.deepEqual(rooms[0], {
+      roomId: ROOM,
+      name: "未命名画布",
+      createdAt: rooms[0].createdAt,
+      lastOpenedAt: null,
+      hasPassword: true,
+    });
+    // list must never leak key material
+    assert.ok(!("wrappedRoomKey" in rooms[0]));
+    assert.ok(!("manageTokenHash" in rooms[0]));
+
+    const get = await fetch(`${s.base}/api/v2/rooms/${ROOM}`);
+    assert.equal(get.status, 200);
+    const room = await get.json();
+    assert.equal(room.wrappedRoomKey, roomBody().wrappedRoomKey);
+    assert.equal(room.passwordSalt, roomBody().passwordSalt);
+    assert.equal(room.passwordIv, roomBody().passwordIv);
+    assert.equal(room.kdfVersion, 1);
+    assert.equal(room.kdfIterations, 210000);
+    // manage token hash is owner-only; never exposed over the API
+    assert.ok(!("manageTokenHash" in room));
+  } finally {
+    await s.close();
+  }
+});
+
+test("lobby: duplicate create -> 409; unknown room -> 404", async () => {
+  const s = await startServer();
+  try {
+    const create = await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+    assert.equal(create.status, 200);
+
+    const dup = await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+    assert.equal(dup.status, 409);
+
+    const missing = await fetch(`${s.base}/api/v2/rooms/${ROOM2}`);
+    assert.equal(missing.status, 404);
+    const openMissing = await fetch(`${s.base}/api/v2/rooms/${ROOM2}/open`, {
+      method: "POST",
+    });
+    assert.equal(openMissing.status, 404);
+  } finally {
+    await s.close();
+  }
+});
+
+test("lobby: open reports successful join and updates lastOpenedAt", async () => {
+  const s = await startServer();
+  try {
+    await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+
+    const before = await (await fetch(`${s.base}/api/v2/rooms/${ROOM}`)).json();
+    assert.equal(before.lastOpenedAt, null);
+
+    await new Promise((r) => setTimeout(r, 5));
+    const open = await fetch(`${s.base}/api/v2/rooms/${ROOM}/open`, {
+      method: "POST",
+    });
+    assert.equal(open.status, 200);
+
+    const after = await (await fetch(`${s.base}/api/v2/rooms/${ROOM}`)).json();
+    assert.ok(after.lastOpenedAt > before.createdAt);
+  } finally {
+    await s.close();
+  }
+});
+
+test("lobby: manage token gates rename and password rotation", async () => {
+  const s = await startServer();
+  try {
+    await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+
+    // wrong token -> 403
+    const badToken = await fetch(`${s.base}/api/v2/rooms/${ROOM}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manageToken: "b".repeat(64), name: "Hijacked" }),
+    });
+    assert.equal(badToken.status, 403);
+    const unchanged = await (await fetch(`${s.base}/api/v2/rooms/${ROOM}`)).json();
+    assert.equal(unchanged.name, "未命名画布");
+
+    // correct token -> rename
+    const rename = await fetch(`${s.base}/api/v2/rooms/${ROOM}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manageToken: MANAGE_TOKEN, name: "设计评审" }),
+    });
+    assert.equal(rename.status, 200);
+    const renamed = await (await fetch(`${s.base}/api/v2/rooms/${ROOM}`)).json();
+    assert.equal(renamed.name, "设计评审");
+
+    // correct token -> rotate password (new wrap material)
+    const rotate = await fetch(`${s.base}/api/v2/rooms/${ROOM}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        manageToken: MANAGE_TOKEN,
+        hasPassword: true,
+        wrappedRoomKey: b64(Buffer.from("new-wrapped-room-key")),
+        passwordSalt: b64(Buffer.from("fedcba9876543210")),
+        passwordIv: b64(Buffer.from("abcdefabcdef")),
+        kdfVersion: 1,
+        kdfIterations: 310000,
+      }),
+    });
+    assert.equal(rotate.status, 200);
+    const rotated = await (await fetch(`${s.base}/api/v2/rooms/${ROOM}`)).json();
+    assert.equal(rotated.wrappedRoomKey, b64(Buffer.from("new-wrapped-room-key")));
+    assert.equal(rotated.kdfIterations, 310000);
+    assert.notEqual(rotated.name, undefined); // name untouched
+    assert.equal(rotated.name, "设计评审");
+  } finally {
+    await s.close();
+  }
+});
+
+test("lobby: rejects invalid payloads", async () => {
+  const s = await startServer();
+  try {
+    const bads = [
+      roomBody({ roomId: "not-hex!" }),
+      roomBody({ name: "" }),
+      roomBody({ name: "   " }),
+      roomBody({ wrappedRoomKey: "!!!not-base64" }),
+      roomBody({ passwordSalt: b64(Buffer.from("short")) }),
+      roomBody({ passwordIv: b64(Buffer.from("short-iv")) }),
+      roomBody({ kdfVersion: 99 }),
+      roomBody({ kdfIterations: 1 }),
+      roomBody({ manageTokenHash: "xyz" }),
+      roomBody({ manageTokenHash: "a".repeat(63) }),
+    ];
+    for (const body of bads) {
+      const res = await fetch(`${s.base}/api/v2/rooms`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(body)}`);
+    }
+    const list = await (await fetch(`${s.base}/api/v2/rooms`)).json();
+    assert.equal(list.rooms.length, 0);
+
+    // PATCH on a valid room with malformed body
+    await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+    const badPatch = await fetch(`${s.base}/api/v2/rooms/${ROOM}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manageToken: MANAGE_TOKEN, name: "" }),
+    });
+    assert.equal(badPatch.status, 400);
+  } finally {
+    await s.close();
+  }
+});
+
+test("lobby: registry schema never stores plaintext password or roomKey", async () => {
+  const s = await startServer();
+  try {
+    await fetch(`${s.base}/api/v2/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roomBody()),
+    });
+
+    const row = s.store.db.prepare("SELECT * FROM lobby_rooms WHERE room_id = ?").get(ROOM);
+    assert.ok(row, "row exists");
+    const columns = Object.keys(row);
+
+    // No plaintext password column: only KDF material (salt/iv) and a flag.
+    assert.ok(!columns.includes("password"), `no plaintext password column; got ${columns.join(", ")}`);
+    assert.ok(
+      !columns.some((col) => /plain|text|raw/i.test(col)),
+      `no column suggests plaintext storage; got ${columns.join(", ")}`,
+    );
+    // No plaintext roomKey column: only the wrapped ciphertext.
+    assert.ok(!columns.includes("room_key"), "no room_key column");
+    assert.ok(columns.includes("wrapped_room_key"), "wrapped_room_key present");
+    assert.ok(!columns.includes("manage_token"), "no manage token column");
+
+    // the wrapped key cell stores exactly the ciphertext the client sent
+    assert.equal(Buffer.from(row.wrapped_room_key).toString("base64"), roomBody().wrappedRoomKey);
+    assert.equal(row.manage_token_hash, MANAGE_TOKEN_HASH);
+  } finally {
+    await s.close();
+  }
+});
+
+test("lobby: presence-like unknown paths 404, non-room ids never 200", async () => {
+  const s = await startServer();
+  try {
+    const presence = await fetch(`${s.base}/api/v2/rooms/presence`);
+    assert.equal(presence.status, 404);
+    const bad = await fetch(`${s.base}/api/v2/rooms/${"z".repeat(20)}`);
+    assert.equal(bad.status, 404);
+    const list = await fetch(`${s.base}/api/v2/rooms`);
+    assert.equal(list.status, 200);
+    assert.deepEqual(await list.json(), { rooms: [] });
+  } finally {
+    await s.close();
   }
 });

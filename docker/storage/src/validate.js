@@ -19,6 +19,23 @@ export const isShareLinkId = (id) =>
 
 export const isValidKind = (kind) => kind === "rooms" || kind === "shareLinks";
 
+/** SHA-256 hex digest of the manage token (64 hex chars). */
+export const isManageTokenHash = (hash) =>
+  typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash);
+
+/** KDF version supported by this server (1 = PBKDF2-SHA256). */
+export const isKdfVersion = (version) => version === 1;
+
+/** PBKDF2 iteration count: >= 100k, <= 2M (sane browser budget). */
+export const isKdfIterations = (iterations) =>
+  Number.isInteger(iterations) && iterations >= 100000 && iterations <= 2000000;
+
+/** Room display name: trimmed, non-empty, bounded length. */
+export const isRoomName = (name) =>
+  typeof name === "string" &&
+  name.trim().length > 0 &&
+  name.trim().length <= 200;
+
 /**
  * Parse a firebase-style storage prefix into { kind, ownerId }.
  * Accepts optional leading slash.
