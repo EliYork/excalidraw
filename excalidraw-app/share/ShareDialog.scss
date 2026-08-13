@@ -133,6 +133,55 @@
         margin: 0;
       }
 
+      &__room {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 0.5rem;
+      }
+
+      &__lobby {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        border-top: 1px solid var(--color-gray-20);
+        padding-top: 0.75rem;
+
+        &__note {
+          margin: 0;
+          font-size: 0.75rem;
+          line-height: 150%;
+          color: var(--text-primary-color);
+          opacity: 0.85;
+        }
+
+        &__passwordRow,
+        &__rotate {
+          display: flex;
+          flex-direction: row;
+          align-items: flex-end;
+          gap: 0.5rem;
+        }
+
+        &__generated {
+          font-size: 0.8125rem;
+          padding: 0.375rem 0.625rem;
+          border-radius: 0.375rem;
+          background: var(--color-primary);
+          color: var(--color-primary-contrast-text, #fff);
+
+          strong {
+            letter-spacing: 0.02em;
+          }
+        }
+
+        &__error {
+          margin: 0;
+          font-size: 0.75rem;
+          color: var(--color-danger, #e03131);
+        }
+      }
+
       &__linkRow {
         display: flex;
         flex-direction: row;
