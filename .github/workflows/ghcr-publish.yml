@@ -68,7 +68,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          img="ghcr.io/${{ github.repository }}/${{ matrix.image }}"
+          # GHCR repository paths must be lowercase (github.repository may
+          # contain uppercase, e.g. "EliYork/excalidraw" -> "eliyork/excalidraw")
+          img="ghcr.io/${GITHUB_REPOSITORY,,}/${{ matrix.image }}"
           short_sha="${GITHUB_SHA::12}"
           tags="${img}:sha-${short_sha}"
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
