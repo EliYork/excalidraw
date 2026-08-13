@@ -1,4 +1,5 @@
 import path from "path";
+
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import svgrPlugin from "vite-plugin-svgr";
@@ -7,6 +8,7 @@ import { VitePWA } from "vite-plugin-pwa";
 import checker from "vite-plugin-checker";
 import { createHtmlPlugin } from "vite-plugin-html";
 import Sitemap from "vite-plugin-sitemap";
+
 import { woff2BrowserPlugin } from "../scripts/woff2/woff2-vite-plugins";
 export default defineConfig(({ mode }) => {
   // To load .env variables
@@ -142,7 +144,10 @@ export default defineConfig(({ mode }) => {
       woff2BrowserPlugin(),
       react(),
       checker({
-        typescript: true,
+        // Type-check with a build-scoped tsconfig (excludes excalidraw-app/tests):
+        // the production image build must not depend on test-only cross-service
+        // imports (e.g. the lobby registry e2e suite referencing docker/room).
+        typescript: { tsconfigPath: "./tsconfig.build.json" },
         eslint:
           envVars.VITE_APP_ENABLE_ESLINT === "false"
             ? undefined

@@ -12,10 +12,12 @@ export const computePresenceCounts = (
   rooms: Map<string, Set<string>>,
 ): Record<string, number> => {
   const counts: Record<string, number> = {};
-  for (const [roomName, sockets] of rooms) {
+  // Map.forEach keeps this compatible with the room service's current
+  // tsconfig/target (no downlevelIteration needed for for...of).
+  rooms.forEach((sockets, roomName) => {
     if (COLLAB_ROOM_RE.test(roomName)) {
       counts[roomName] = sockets.size;
     }
-  }
+  });
   return counts;
 };
