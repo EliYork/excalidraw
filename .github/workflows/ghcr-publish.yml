@@ -1,0 +1,101 @@
+name: Publish GHCR images
+
+# Builds the three self-hosted images (app / room / storage) and publishes
+# them to GitHub Container Registry under the repository namespace:
+#
+#   ghcr.io/<owner>/<repo>/{app,room,storage}
+#
+# Tag strategy (see SELFHOST.md "GHCR 镜像发布与生产部署"):
+#   - sha-<12hex>  every push, immutable, pin for reproducible deploys/rollback
+#   - latest       default branch (master) or the newest version tag
+#   - vX.Y.Z       semver tag pushes (v*), in addition to latest
+#
+# No external secrets needed: GITHUB_TOKEN has packages:write scoped to the
+# repository, so forks publish under their own GHCR namespace automatically.
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: app
+            context: .
+            dockerfile: Dockerfile
+            description: Excalidraw web app (nginx frontend + reverse proxy), self-hosted edition
+          - image: room
+            context: docker/room
+            dockerfile: Dockerfile
+            description: Excalidraw collaboration room server (Socket.IO)
+          - image: storage
+            context: docker/storage
+            dockerfile: Dockerfile
+            description: Excalidraw self-hosted storage (scenes + encrypted files)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc # v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Compute image tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          img="ghcr.io/${{ github.repository }}/${{ matrix.image }}"
+          short_sha="${GITHUB_SHA::12}"
+          tags="${img}:sha-${short_sha}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            tags+=",${img}:${{ github.ref_name }},${img}:latest"
+          else
+            tags+=",${img}:latest"
+          fi
+          created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "tags=${tags}" >> "${GITHUB_OUTPUT}"
+          echo "created=${created}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64, linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Excalidraw ${{ matrix.image }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.licenses=MIT
+          # BuildKit cache shared across runs (per-image scope so the three
+          # images don't evict each other's layers in the 6 GB GH cache)
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
