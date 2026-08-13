@@ -132,6 +132,7 @@ import {
 } from "./data/LocalData";
 import { isBrowserStorageStateNewer } from "./data/tabSync";
 import { ShareDialog, shareDialogStateAtom } from "./share/ShareDialog";
+import { Lobby } from "./lobby/Lobby";
 import CollabError, { collabErrorIndicatorAtom } from "./collab/CollabError";
 import { useHandleAppTheme } from "./useHandleAppTheme";
 import { getPreferredLanguage } from "./app-language/language-detector";
@@ -201,6 +202,27 @@ if (window.self !== window.top) {
     // ignore
   }
 }
+
+/**
+ * The lobby is the root view: it shows whenever the URL does not point at an
+ * external scene (collaboration link, share-link json, url param or ?id=).
+ * Entering a room sets the #room=... hash, which flips this to false and
+ * starts the standard collaboration flow. Collaboration is disabled inside
+ * iframes, so the lobby (whose rooms are collab rooms) stays hidden there.
+ */
+const computeLobbyVisible = () => {
+  if (isRunningInIframe()) {
+    return false;
+  }
+  const hash = window.location.hash;
+  const searchParams = new URLSearchParams(window.location.search);
+  return (
+    !isCollaborationLink(window.location.href) &&
+    !hash.startsWith("#json=") &&
+    !hash.startsWith("#url=") &&
+    !searchParams.has("id")
+  );
+};
 
 const shareableLinkConfirmDialog = {
   title: t("overwriteConfirm.modal.shareableLink.title"),
@@ -411,6 +433,18 @@ const ExcalidrawWrapper = () => {
   const [isCollaborating] = useAtomWithInitialValue(isCollaboratingAtom, () => {
     return isCollaborationLink(window.location.href);
   });
+
+  // Lobby overlay visibility (root view vs. scene views).
+  const [lobbyVisible, setLobbyVisible] = useState(() => computeLobbyVisible());
+  useEffect(() => {
+    const updateLobbyVisibility = () => setLobbyVisible(computeLobbyVisible());
+    window.addEventListener(EVENT.HASHCHANGE, updateLobbyVisibility);
+    window.addEventListener("popstate", updateLobbyVisibility);
+    return () => {
+      window.removeEventListener(EVENT.HASHCHANGE, updateLobbyVisibility);
+      window.removeEventListener("popstate", updateLobbyVisibility);
+    };
+  }, []);
   const collabError = useAtomValue(collabErrorIndicatorAtom);
   const userToFollow = useAtomValue(userToFollowAtom);
 
@@ -1298,6 +1332,7 @@ const ExcalidrawWrapper = () => {
             ref={debugCanvasRef}
           />
         )}
+        <Lobby visible={lobbyVisible} />
       </Excalidraw>
     </div>
   );
