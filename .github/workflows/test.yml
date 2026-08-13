@@ -35,4 +35,4 @@ jobs:
           yarn install
           yarn test:selfhost
           # storage backend suite (node:test) also needs node:sqlite
-          yarn --cwd docker/storage test
+          node --test docker/storage/test/
