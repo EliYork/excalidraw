@@ -3,6 +3,8 @@ import express from "express";
 import http from "http";
 import { Server as SocketIO } from "socket.io";
 
+import { computePresenceCounts } from "./presence";
+
 type UserToFollow = {
   socketId: string;
   username: string;
@@ -56,16 +58,7 @@ try {
   // (exact location match), while the storage service serves everything else
   // under /api/v2/.
   app.get("/api/v2/rooms/presence", (_req, res) => {
-    const counts: Record<string, number> = {};
-    const rooms = io.sockets.adapter.rooms;
-    for (const [roomName, sockets] of rooms) {
-      // collaboration room ids are 10 random bytes hex (20 chars); this
-      // excludes per-socket rooms and follow@ rooms
-      if (/^[a-f0-9]{20}$/.test(roomName)) {
-        counts[roomName] = sockets.size;
-      }
-    }
-    res.json(counts);
+    res.json(computePresenceCounts(io.sockets.adapter.rooms));
   });
 
   io.on("connection", (socket) => {
